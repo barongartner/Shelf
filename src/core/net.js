@@ -44,6 +44,14 @@ function isIPv4(a) {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(a);
 }
 
+function ownAddresses() {
+  const out = [];
+  for (const list of Object.values(require('os').networkInterfaces())) {
+    for (const a of list || []) if (a.family === 'IPv4') out.push(a.address);
+  }
+  return out;
+}
+
 // Talks to the other computers: an HTTP server they sync with and download
 // from, mDNS to find them, and a download queue that pulls every item this
 // computer doesn't have a copy of yet.
@@ -312,9 +320,9 @@ class Net extends EventEmitter {
       await fs.promises.mkdir(path.dirname(dest), { recursive: true });
       if (it.kind === 'folder') {
         await fs.promises.mkdir(tmp, { recursive: true });
-        for (const d of it.dirs || []) await fs.promises.mkdir(files.safeJoin(tmp, d), { recursive: true });
+        for (const d of it.dirs || []) await fs.promises.mkdir(files.safeJoin(tmp, files.safeRel(d)), { recursive: true });
         for (const f of it.files || []) {
-          const out = files.safeJoin(tmp, f.p);
+          const out = files.safeJoin(tmp, files.safeRel(f.p));
           await fs.promises.mkdir(path.dirname(out), { recursive: true });
           await fetchToFile(`${base}?p=${encodeURIComponent(f.p)}`, headers, out, progress, ac.signal);
         }
@@ -443,7 +451,9 @@ class Net extends EventEmitter {
   _fromService(svc) {
     const txt = svc.txt || {};
     const addrs = (svc.addresses || []).filter(isIPv4);
-    const addr = addrs.find((a) => !a.startsWith('169.254.')) || addrs[0] || svc.referer?.address;
+    let addr = addrs.find((a) => !a.startsWith('169.254.')) || addrs[0] || svc.referer?.address;
+    // Another copy on this same computer: loopback skips the network entirely.
+    if (ownAddresses().includes(addr)) addr = '127.0.0.1';
     this._seen({ id: txt.id, name: txt.name, sid: txt.sid, addr, port: svc.port });
   }
 }

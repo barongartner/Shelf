@@ -56,9 +56,10 @@ body {
   -webkit-user-select: none;
 }
 
-/* macOS draws a translucent window behind the page. */
+/* macOS draws a translucent window behind the page; a light tint on top
+   keeps text readable over busy backgrounds. */
 body.mac {
-  background: transparent;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
 }
 body.mac .bar,
 body.mac .foot {
@@ -119,6 +120,10 @@ button {
 }
 
 /* ---- list ---- */
+
+main[hidden] {
+  display: none;
+}
 
 main {
   flex: 1;

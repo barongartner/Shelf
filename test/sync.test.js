@@ -148,3 +148,10 @@ test('joining asks the other computer, then shares its shelf', async (t) => {
   await until(() => b.shelf.items.get(it.id), 'shelf contents after joining');
   await until(() => a.net.peerList().some((p) => p.name === 'PC' && p.online), 'joiner shows up as a peer');
 });
+
+test('file names Windows would reject are cleaned up on the way in', () => {
+  const { safeRel, safeName } = require('../src/core/files');
+  assert.strictEqual(safeRel('a:b/c?.txt'), 'a_b/c_.txt');
+  assert.strictEqual(safeName('trailing dot.'), 'trailing dot');
+  assert.strictEqual(safeName('..'), 'item');
+});

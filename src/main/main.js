@@ -256,7 +256,6 @@ function updateTray() {
   const n = shelf.visible().length;
   if (isMac) tray.setTitle(n ? String(n) : '', { fontType: 'monospacedDigit' });
   tray.setToolTip(n ? `Shelf — ${n} item${n === 1 ? '' : 's'}` : 'Shelf');
-  if (!isMac) tray.setContextMenu(trayMenu());
 }
 
 // ---- state for the window ----
@@ -308,15 +307,14 @@ function snapshot() {
   };
 }
 
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i;
+// Quick Look / shell thumbnails: a preview for images and documents, the
+// file or folder icon otherwise. app.getFileIcon is avoided on macOS because
+// it crashes Electron 44 there.
 async function loadIcon(it, p) {
   icons.set(it.id, null);
   try {
-    let img = null;
-    if (it.kind === 'file' && IMAGE_EXT.test(p)) {
-      img = await nativeImage.createThumbnailFromPath(p, { width: 96, height: 96 }).catch(() => null);
-    }
-    if (!img || img.isEmpty()) img = await app.getFileIcon(p, { size: 'large' });
+    let img = await nativeImage.createThumbnailFromPath(p, { width: 96, height: 96 }).catch(() => null);
+    if ((!img || img.isEmpty()) && !isMac) img = await app.getFileIcon(p, { size: 'large' });
     if (img && !img.isEmpty()) {
       icons.set(it.id, img.toDataURL());
       pushState();

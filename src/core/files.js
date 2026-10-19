@@ -83,4 +83,10 @@ function safeName(name) {
   return cleaned || 'item';
 }
 
-module.exports = { describe, safeJoin, cloneCopy, isInside, exists, safeName };
+// Makes each segment of a manifest path valid here; a Mac file name can hold
+// characters Windows won't accept.
+function safeRel(rel) {
+  return String(rel).split('/').map(safeName).join('/');
+}
+
+module.exports = { describe, safeJoin, safeRel, cloneCopy, isInside, exists, safeName };

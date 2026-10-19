@@ -102,7 +102,7 @@ function buildRow(it) {
   const meta = el('div', 'meta');
   const metaText = el('span');
   const leave = el('span', 'leave');
-  meta.append(metaText, leave);
+  meta.append(leave, metaText);
   info.append(name, meta);
   const actions = el('div', 'actions');
   const keep = el('button', 'act keep', 'Keep');
@@ -214,7 +214,7 @@ function updateRow(row, it) {
 }
 
 function updateCountdown(row, it) {
-  row.parts.leave.textContent = it.expiresAt ? ' · ' + fmtLeft(it.expiresAt - Date.now()) : '';
+  row.parts.leave.textContent = it.expiresAt ? fmtLeft(it.expiresAt - Date.now()) + ' · ' : '';
 }
 
 function current(id) {
