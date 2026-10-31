@@ -15,6 +15,50 @@ let firstRender = true;
 
 document.body.classList.toggle('mac', isMac);
 
+// ---- the popup shell ----
+
+// The panel is drawn inside a transparent window. While it is docked to the
+// tray icon, the main process says which screen edge the icon is on and how
+// far along that edge; the caret is an SVG triangle whose two slanted sides
+// carry the panel's border and whose base covers it.
+const CARETS = {
+  bottom: ['0 0 20 12', 'M0 0 L10 11 L20 0'],
+  top: ['0 0 20 12', 'M0 12 L10 1 L20 12'],
+  left: ['0 0 12 20', 'M12 0 L1 10 L12 20'],
+  right: ['0 0 12 20', 'M0 0 L11 10 L0 20'],
+};
+
+function applyPlacement(p) {
+  const edge = p && CARETS[p.edge] ? p.edge : null;
+  for (const e of Object.keys(CARETS)) document.body.classList.toggle('edge-' + e, e === edge);
+  const caret = $('caret');
+  // An SVG element has no .hidden property; the attribute is what the CSS sees.
+  caret.toggleAttribute('hidden', !edge);
+  if (!edge) return;
+  const [box, d] = CARETS[edge];
+  caret.setAttribute('viewBox', box);
+  caret.querySelector('.caret-fill').setAttribute('d', d + ' Z');
+  caret.querySelector('.caret-line').setAttribute('d', d);
+  document.body.style.setProperty('--caret', `${p.caret}px`);
+}
+
+// The main process says "slide" right before it shows the window, so the
+// panel slides in from the taskbar. The timer is a safety net: the panel
+// must never stay invisible if that message is somehow missed.
+function slideIn() {
+  document.body.classList.remove('in');
+  void document.body.offsetWidth;
+  document.body.classList.add('in');
+}
+api.onSlide(slideIn);
+api.onPlacement(applyPlacement);
+setTimeout(() => document.body.classList.add('in'), 1500);
+
+// A click on the clear band around the panel is a click outside it.
+document.addEventListener('mousedown', (e) => {
+  if ((e.target === document.body || e.target.id === 'frame') && state && !state.settings.onTop) api.hide();
+});
+
 // ---- helpers ----
 
 function el(tag, cls, text) {
@@ -581,6 +625,7 @@ document.addEventListener('keydown', (e) => {
 
 function apply(s) {
   state = s;
+  applyPlacement(s.placement);
   $('btn-pin').classList.toggle('on', s.settings.onTop);
   $('btn-pin').title = s.settings.onTop ? 'Kept on top (click to stop)' : 'Keep on top';
   renderItems();

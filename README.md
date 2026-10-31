@@ -42,7 +42,8 @@ on your local network.
 ## Using it
 
 Shelf lives in the menu bar (Mac) or the notification area (Windows). Click the icon to
-show or hide the shelf; it opens next to the icon until you drag it somewhere else.
+show or hide the shelf; it pops up at the icon like the system's own flyouts, with a caret
+pointing at it, until you drag it somewhere else (Settings has a button to dock it again).
 
 - **Put something on the shelf:** drag files or folders onto it, or press Cmd+V / Ctrl+V to
   paste text, an image, or a copied file.

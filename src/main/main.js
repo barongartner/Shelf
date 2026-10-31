@@ -54,6 +54,14 @@ let qrCache = null; // { text, data }
 const icons = new Map(); // item id -> data URL
 const DATA = () => app.getPath('userData');
 
+// The shelf is a popup drawn inside a slightly larger transparent window:
+// PANEL is the part you see, MARGIN the clear band around it that holds the
+// shadow, and the caret pointing at the tray icon lives in that band too.
+const PANEL_W = 340;
+const PANEL_H = 520;
+const MARGIN = 12;
+let placement = null; // { edge, caret } while docked to the tray icon, null once dragged away
+
 // ---- settings ----
 
 function defaultName() {
@@ -91,7 +99,10 @@ function loadSettings() {
     lingerMin: s.lingerMin ?? 10,
     onTop: s.onTop ?? true,
     popUp: s.popUp ?? true,
-    bounds: s.bounds || null,
+    // A position saved by the old plain window is dropped once, so the popup
+    // starts out docked to its icon.
+    bounds: s.layout === 'popup' ? s.bounds || null : null,
+    layout: 'popup',
     address: s.address || null,
   };
 }
@@ -139,7 +150,7 @@ async function start() {
   shelf.on('arrived', () => {
     if (settings.popUp && win && !win.isVisible()) {
       placeIfUnmoved();
-      win.showInactive();
+      reveal(true);
     }
   });
   net.on('peers', pushState);
@@ -188,16 +199,10 @@ app.on('before-quit', async (e) => {
 
 // ---- window ----
 
-function defaultBounds() {
-  const { workArea } = screen.getPrimaryDisplay();
-  const width = 340;
-  const height = Math.min(520, workArea.height - 80);
-  return {
-    width,
-    height,
-    x: workArea.x + workArea.width - width - 24,
-    y: workArea.y + Math.round((workArea.height - height) / 2),
-  };
+function windowSize(display) {
+  const wa = display.workArea;
+  const panelH = Math.max(300, Math.min(PANEL_H, wa.height - 2 * MARGIN - 16));
+  return { width: PANEL_W + 2 * MARGIN, height: panelH + 2 * MARGIN };
 }
 
 function boundsOnScreen(b) {
@@ -225,22 +230,26 @@ function opensAtLogin() {
 }
 
 function createWindow() {
-  const bounds = boundsOnScreen(settings.bounds) ? settings.bounds : defaultBounds();
+  // Only the position is kept from last time; the size follows the screen.
+  const saved = boundsOnScreen(settings.bounds) ? settings.bounds : null;
   win = new BrowserWindow({
-    ...bounds,
-    minWidth: 280,
-    minHeight: 240,
+    ...windowSize(saved ? screen.getDisplayMatching(saved) : screen.getPrimaryDisplay()),
+    ...(saved ? { x: saved.x, y: saved.y } : {}),
     show: false,
     frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
     fullscreenable: false,
     maximizable: false,
     minimizable: false,
     skipTaskbar: true,
     alwaysOnTop: settings.onTop,
+    // A tool window on Windows: no taskbar button and no Alt+Tab entry,
+    // like the system's own flyouts.
+    type: isMac ? undefined : 'toolbar',
     title: 'Shelf',
-    backgroundColor: isMac ? '#00000000' : undefined,
-    vibrancy: isMac ? 'under-window' : undefined,
-    visualEffectState: isMac ? 'active' : undefined,
+    backgroundColor: '#00000000',
     icon: isMac ? undefined : path.join(ASSETS, 'icon-256.png'),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload.js'),
@@ -255,7 +264,7 @@ function createWindow() {
   win.once('ready-to-show', () => {
     if (firstRun || !openedAtLogin() || process.env.SHELF_SNAPSHOT) {
       placeIfUnmoved();
-      win.show();
+      reveal(false);
     }
     snapshotIfAsked();
   });
@@ -263,9 +272,9 @@ function createWindow() {
     if (placing) return;
     settings.bounds = win.getBounds();
     saveSettings();
+    setPlacement(null); // dragged away from the icon: no caret until it is moved back
   };
   win.on('moved', remember);
-  win.on('resized', remember);
   win.on('show', updateTray);
   win.on('hide', updateTray);
   win.on('blur', () => {
@@ -293,10 +302,11 @@ function applyOnTop() {
   win.setAlwaysOnTop(settings.onTop, 'floating');
 }
 
-// Puts the window next to the tray icon (above a bottom taskbar, under the
-// menu bar) until the user drags it somewhere else. The icon's bounds come
-// from the click when there was one; Windows reports zeros for a hidden or
-// just-created icon, and then the cursor is the best guess.
+// Docks the window to the tray icon: flush against the taskbar (under the
+// menu bar on a Mac), centred on the icon, with the caret pointing at it.
+// The icon's bounds come from the click when there was one; Windows reports
+// zeros for a hidden or just-created icon, and then the cursor is the best
+// guess.
 function placeNearTray(clickBounds) {
   if (!tray || !win) return false;
   let b = clickBounds && clickBounds.width ? clickBounds : null;
@@ -305,39 +315,72 @@ function placeNearTray(clickBounds) {
       b = tray.getBounds();
     } catch {}
   }
+  if (process.env.SHELF_DEV && process.env.SHELF_DEV_TRAY) {
+    // Dev aid: pretend the icon is at x,y[,w,h] to try every taskbar edge.
+    const [x, y, w = 24, h = 24] = process.env.SHELF_DEV_TRAY.split(',').map(Number);
+    b = { x, y, width: w, height: h };
+  }
   if (!b || (!b.width && !b.height)) {
     const c = screen.getCursorScreenPoint();
     b = { x: c.x, y: c.y, width: 1, height: 1 };
   }
-  const display = screen.getDisplayNearestPoint({ x: b.x + Math.floor(b.width / 2), y: b.y + Math.floor(b.height / 2) });
-  const wa = display.workArea;
-  const { width, height } = win.getBounds();
-  let x = Math.round(b.x + b.width / 2 - width / 2);
-  let y;
-  if (isMac) y = wa.y + 6;
-  else if (b.y >= wa.y + wa.height - 1) y = wa.y + wa.height - height - 10; // taskbar at the bottom
-  else if (b.y + b.height <= wa.y + 1) y = wa.y + 10; // taskbar at the top
-  else {
-    y = Math.round(b.y + b.height / 2 - height / 2);
-    x = b.x >= wa.x + wa.width - 1 ? wa.x + wa.width - width - 10 : wa.x + 10; // taskbar on a side
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  const display = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) });
+  const { bounds: db, workArea: wa } = display;
+  const { width, height } = windowSize(display);
+  // The taskbar is on whichever screen edge the icon is nearest to.
+  let edge = 'top';
+  if (!isMac) {
+    const d = { top: cy - db.y, bottom: db.y + db.height - cy, left: cx - db.x, right: db.x + db.width - cx };
+    edge = Object.keys(d).reduce((a, k) => (d[k] < d[a] ? k : a));
   }
-  x = Math.min(Math.max(x, wa.x + 8), wa.x + wa.width - width - 8);
-  y = Math.min(Math.max(y, wa.y + 8), wa.y + wa.height - height - 8);
+  const horizontal = edge === 'top' || edge === 'bottom';
+  let x;
+  let y;
+  if (horizontal) {
+    x = Math.min(Math.max(cx - width / 2, wa.x + 8 - MARGIN), wa.x + wa.width - width + MARGIN - 8);
+    y = edge === 'bottom' ? wa.y + wa.height - height : wa.y;
+  } else {
+    y = Math.min(Math.max(cy - height / 2, wa.y + 8 - MARGIN), wa.y + wa.height - height + MARGIN - 8);
+    x = edge === 'left' ? wa.x : wa.x + wa.width - width;
+  }
+  x = Math.round(x);
+  y = Math.round(y);
+  // Where along that edge the caret sits, kept off the rounded corners.
+  const along = horizontal ? cx - x : cy - y;
+  const span = horizontal ? width : height;
+  const caret = Math.round(Math.min(Math.max(along, MARGIN + 24), span - MARGIN - 24));
   placing = true;
-  win.setPosition(Math.round(x), Math.round(y));
+  win.setBounds({ x, y, width, height });
   setTimeout(() => (placing = false), 300);
+  setPlacement({ edge, caret });
+  if (process.env.SHELF_DEV) console.log(`SHELF_PLACED ${JSON.stringify({ icon: b, edge, caret, x, y, width, height })}`);
   return true;
+}
+
+function setPlacement(p) {
+  placement = p;
+  if (win && !win.isDestroyed()) win.webContents.send('placement', p);
 }
 
 function placeIfUnmoved(clickBounds) {
   if (!settings.bounds) placeNearTray(clickBounds);
+  else if (placement) setPlacement(null);
+}
+
+// Every show goes through here so the page can play its slide-in first.
+function reveal(inactive) {
+  if (!win.isVisible()) win.webContents.send('slide');
+  if (inactive) win.showInactive();
+  else win.show();
 }
 
 function showWindow(clickBounds) {
   if (!win) return;
   placeIfUnmoved(clickBounds);
   shownAt = Date.now();
-  win.show();
+  reveal(false);
   win.focus();
 }
 
@@ -488,6 +531,7 @@ function snapshot() {
     port: net.port,
     addresses: net.addresses.ips,
     version: app.getVersion(),
+    placement,
     settings: {
       lingerMin: settings.lingerMin,
       onTop: settings.onTop,

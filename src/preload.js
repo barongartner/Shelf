@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('shelf', {
   onFlash: (cb) => ipcRenderer.on('flash', (_e, msg) => cb(msg)),
   onOpenSettings: (cb) => ipcRenderer.on('open-settings', () => cb()),
   onOpenPhone: (cb) => ipcRenderer.on('open-phone', () => cb()),
+  onPlacement: (cb) => ipcRenderer.on('placement', (_e, p) => cb(p)),
+  onSlide: (cb) => ipcRenderer.on('slide', () => cb()),
   pathFor: (file) => webUtils.getPathForFile(file),
 
   addPaths: call('add-paths'),
