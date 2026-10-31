@@ -13,6 +13,9 @@
         <button id="btn-pin" class="icon-btn" title="Keep on top">
           <svg viewBox="0 0 16 16"><path d="M9.8 1.5 14.5 6.2l-1.1 1.1-.9-.4-2.8 2.8.3 2.5-1.1 1.1-2.6-2.6L3 14l-1-1 3.3-3.3-2.6-2.6L3.8 6l2.5.3 2.8-2.8-.4-.9z"/></svg>
         </button>
+        <button id="btn-phone" class="icon-btn" title="Connect a phone">
+          <svg viewBox="0 0 16 16"><path d="M5 1h6a1.5 1.5 0 0 1 1.5 1.5v11A1.5 1.5 0 0 1 11 15H5a1.5 1.5 0 0 1-1.5-1.5v-11A1.5 1.5 0 0 1 5 1zm0 1.5v11h6v-11H5zm2 9.5h2v1H7z"/></svg>
+        </button>
         <button id="btn-settings" class="icon-btn" title="Settings">
           <svg viewBox="0 0 16 16"><path d="M8 5.2A2.8 2.8 0 1 0 8 10.8 2.8 2.8 0 0 0 8 5.2Zm6.3 3.6-1.4.4a5 5 0 0 1-.5 1.2l.7 1.3-1.3 1.3-1.3-.7a5 5 0 0 1-1.2.5l-.4 1.4H7.1l-.4-1.4a5 5 0 0 1-1.2-.5l-1.3.7-1.3-1.3.7-1.3a5 5 0 0 1-.5-1.2l-1.4-.4V7.2l1.4-.4c.1-.4.3-.8.5-1.2l-.7-1.3 1.3-1.3 1.3.7c.4-.2.8-.4 1.2-.5l.4-1.4h1.8l.4 1.4c.4.1.8.3 1.2.5l1.3-.7 1.3 1.3-.7 1.3c.2.4.4.8.5 1.2l1.4.4Z"/></svg>
         </button>
@@ -35,9 +38,45 @@
           <rect x="97" y="52" width="5" height="10" rx="1.5" class="art-plank" />
         </svg>
         <p class="empty-title">Drop files here</p>
-        <p class="empty-sub" id="empty-sub">They show up on your other computers right away.</p>
+        <p class="empty-sub" id="empty-sub">They show up on your other computers and your phone right away.</p>
       </div>
     </main>
+
+    <section id="phone-view" hidden>
+      <div class="settings-scroll">
+        <h2>Connect a phone</h2>
+        <div class="qr-card">
+          <div id="qr-box" class="qr-box">
+            <img id="qr" alt="QR code to open the shelf on a phone" hidden />
+            <div id="qr-placeholder" class="qr-placeholder">Making the code</div>
+          </div>
+          <p class="qr-steps">Point the phone's camera at the code and open the link. Both must be on the same Wi-Fi.</p>
+          <p class="qr-steps" id="qr-warning">On the phone, press and hold a photo to save it to Photos. One-tap saving of many at once is set up from the phone page's Settings.</p>
+        </div>
+        <div class="code-row pin-row">
+          <div class="grow">
+            <div class="small-label">No camera? Open this address on the phone and type the code</div>
+            <div id="phone-base" class="code small"></div>
+            <div id="phone-pin" class="code pin"></div>
+          </div>
+          <div class="stack">
+            <button id="btn-copy-url" class="btn">Copy link</button>
+            <button id="btn-new-code" class="btn">New code</button>
+          </div>
+        </div>
+        <p id="pair-expiry" class="hint"></p>
+        <p id="phone-problem" class="hint problem" hidden></p>
+        <label class="field" id="addr-field" hidden>
+          <span>This computer has more than one network address. Use</span>
+          <select id="phone-addr"></select>
+        </label>
+
+        <h2>Phones on this shelf</h2>
+        <ul id="device-list" class="peer-list"></ul>
+        <p class="hint">A phone on the shelf can download from it and add to it through any of your computers, until you remove it here.</p>
+        <p class="hint">Downloads to the phone are only possible from a computer that already has the file. The phone shows what is still arriving.</p>
+      </div>
+    </section>
 
     <section id="settings-view" hidden>
       <div class="settings-scroll">
@@ -84,7 +123,7 @@
 
         <h2>Behavior</h2>
         <label class="field">
-          <span>After something is dragged out, keep it for</span>
+          <span>After something is dragged out or saved to a phone, keep it for</span>
           <select id="set-linger">
             <option value="1">1 minute</option>
             <option value="5">5 minutes</option>
@@ -97,6 +136,7 @@
         <label class="check"><input id="set-popup" type="checkbox" /> Show the shelf when something arrives</label>
         <label class="check"><input id="set-ontop" type="checkbox" /> Keep the shelf on top of other windows</label>
         <label class="check"><input id="set-login" type="checkbox" /> Open Shelf at login</label>
+        <button id="btn-reset-pos" class="btn subtle">Move the shelf back next to its icon</button>
 
         <button id="btn-clear" class="btn danger">Clear the shelf on every computer</button>
         <p id="version" class="hint center"></p>

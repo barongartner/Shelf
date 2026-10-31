@@ -6,12 +6,15 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const QRCode = require('qrcode');
 const { Shelf } = require('../core/shelf');
 const { Net, newCode, normalizeCode } = require('../core/net');
 const files = require('../core/files');
+const { extOf } = require('../core/httpu');
 
 const isMac = process.platform === 'darwin';
 const ASSETS = path.join(__dirname, '..', '..', 'assets');
+const WEB = path.join(__dirname, '..', 'web');
 
 // SHELF_PROFILE runs a separate copy with its own data, so two shelves can
 // talk to each other on one computer while developing.
@@ -22,14 +25,32 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => showWindow());
-  app.whenReady().then(start);
+  app.whenReady().then(start).catch((err) => {
+    // Never leave a window-less process holding the single-instance lock.
+    dialog.showErrorBox('Shelf could not start', String((err && err.stack) || err));
+    app.exit(1);
+  });
 }
+
+// The portable exe runs from a temp folder that is deleted on exit, so the
+// login item must point at the exe the user actually keeps.
+const loginItem = () => ({
+  path: process.env.PORTABLE_EXECUTABLE_FILE || undefined,
+  args: ['--hidden'],
+});
 
 let win = null;
 let tray = null;
 let shelf = null;
 let net = null;
 let settings = null;
+let firstRun = false;
+let placing = false;
+let hiddenAt = 0;
+let shownAt = 0;
+let dialogOpen = false;
+let thumbQueue = Promise.resolve();
+let qrCache = null; // { text, data }
 const icons = new Map(); // item id -> data URL
 const DATA = () => app.getPath('userData');
 
@@ -45,10 +66,24 @@ function defaultName() {
 }
 
 function loadSettings() {
-  let s = {};
+  const file = path.join(DATA(), 'settings.json');
+  let s = null;
+  let raw = null;
   try {
-    s = JSON.parse(fs.readFileSync(path.join(DATA(), 'settings.json'), 'utf8'));
+    raw = fs.readFileSync(file, 'utf8');
+    s = JSON.parse(raw);
   } catch {}
+  if (!s && raw) {
+    // A half-written file must not cost this computer its identity.
+    try {
+      fs.copyFileSync(file, file + '.bad');
+    } catch {}
+    try {
+      s = JSON.parse(fs.readFileSync(file + '.tmp', 'utf8'));
+    } catch {}
+  }
+  firstRun = !s && !raw;
+  s = s || {};
   return {
     id: s.id || crypto.randomBytes(8).toString('hex'),
     name: s.name || defaultName() + (profile ? ` (${profile})` : ''),
@@ -57,6 +92,7 @@ function loadSettings() {
     onTop: s.onTop ?? true,
     popUp: s.popUp ?? true,
     bounds: s.bounds || null,
+    address: s.address || null,
   };
 }
 
@@ -64,7 +100,11 @@ let saveSettingsTimer = null;
 function saveSettings() {
   clearTimeout(saveSettingsTimer);
   saveSettingsTimer = setTimeout(() => {
-    fs.writeFileSync(path.join(DATA(), 'settings.json'), JSON.stringify(settings, null, 2));
+    const file = path.join(DATA(), 'settings.json');
+    try {
+      fs.writeFileSync(file + '.tmp', JSON.stringify(settings, null, 2));
+      fs.renameSync(file + '.tmp', file);
+    } catch {}
   }, 200);
 }
 
@@ -79,21 +119,53 @@ async function start() {
   const self = { id: settings.id, name: settings.name };
   shelf = new Shelf({ dataDir: DATA(), self });
   await shelf.load();
-  net = new Net({ shelf, self, code: settings.code, onPairRequest: askToPair });
+  net = new Net({
+    shelf,
+    self,
+    code: settings.code,
+    onPairRequest: askToPair,
+    web: {
+      webDir: WEB,
+      version: app.getVersion(),
+      thumb: thumbForWeb,
+      lingerMs,
+      certDir: path.join(DATA(), 'certs'),
+    },
+  });
   await net.start();
 
   shelf.on('change', pushState);
   shelf.on('dropped', (id) => icons.delete(id));
   shelf.on('arrived', () => {
-    if (settings.popUp && win && !win.isVisible()) win.showInactive();
+    if (settings.popUp && win && !win.isVisible()) {
+      placeIfUnmoved();
+      win.showInactive();
+    }
   });
   net.on('peers', pushState);
+  net.on('addresses', () => {
+    qrCache = null;
+    pushState();
+  });
+  net.on('paired', (d) => {
+    flash(`${d.name} is now on the shelf`);
+    pushState();
+  });
 
   createWindow();
   createTray();
   ipc();
 
   for (const p of (process.env.SHELF_SEED || '').split(',').filter(Boolean)) await shelf.addPath(p);
+
+  // Dev aid: SHELF_DEV=1 prints a pairing link so the phone page can be
+  // opened in a browser on this computer.
+  if (process.env.SHELF_DEV) {
+    net.web.newPair();
+    console.log(`SHELF_PHONE_URL ${phoneUrl(true)}`);
+    console.log(`SHELF_LOCAL_URL http://127.0.0.1:${net.port}/#p=${net.web.pairInfo().code}`);
+    console.log(`SHELF_SECURE_URL https://127.0.0.1:${net.httpsPort}/`);
+  }
 }
 
 app.on('window-all-closed', () => {});
@@ -103,8 +175,15 @@ app.on('before-quit', async (e) => {
   if (quitting || !net) return;
   e.preventDefault();
   quitting = true;
-  await Promise.race([Promise.all([shelf.saveNow(), net.stop()]), new Promise((r) => setTimeout(r, 1500))]);
-  app.quit();
+  const deadline = setTimeout(() => app.exit(0), 1500);
+  try {
+    await Promise.all([shelf.saveNow(), net.stop()]);
+  } catch {
+    // A failed save must not keep the app alive.
+  } finally {
+    clearTimeout(deadline);
+    app.quit();
+  }
 });
 
 // ---- window ----
@@ -112,7 +191,7 @@ app.on('before-quit', async (e) => {
 function defaultBounds() {
   const { workArea } = screen.getPrimaryDisplay();
   const width = 340;
-  const height = Math.min(500, workArea.height - 80);
+  const height = Math.min(520, workArea.height - 80);
   return {
     width,
     height,
@@ -127,12 +206,30 @@ function boundsOnScreen(b) {
     b.x + 60 > w.x && b.x < w.x + w.width - 60 && b.y >= w.y - 10 && b.y < w.y + w.height - 40);
 }
 
+function openedAtLogin() {
+  if (process.argv.includes('--hidden')) return true;
+  if (isMac) {
+    try {
+      return !!app.getLoginItemSettings(loginItem()).wasOpenedAtLogin;
+    } catch {}
+  }
+  return false;
+}
+
+function opensAtLogin() {
+  try {
+    return !!app.getLoginItemSettings(loginItem()).openAtLogin;
+  } catch {
+    return false;
+  }
+}
+
 function createWindow() {
   const bounds = boundsOnScreen(settings.bounds) ? settings.bounds : defaultBounds();
   win = new BrowserWindow({
     ...bounds,
-    minWidth: 260,
-    minHeight: 220,
+    minWidth: 280,
+    minHeight: 240,
     show: false,
     frame: false,
     fullscreenable: false,
@@ -156,10 +253,14 @@ function createWindow() {
   if (isMac) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.once('ready-to-show', () => {
-    win.show();
+    if (firstRun || !openedAtLogin() || process.env.SHELF_SNAPSHOT) {
+      placeIfUnmoved();
+      win.show();
+    }
     snapshotIfAsked();
   });
   const remember = () => {
+    if (placing) return;
     settings.bounds = win.getBounds();
     saveSettings();
   };
@@ -167,6 +268,17 @@ function createWindow() {
   win.on('resized', remember);
   win.on('show', updateTray);
   win.on('hide', updateTray);
+  win.on('blur', () => {
+    // Without "keep on top" the shelf behaves like a menu: it goes away when
+    // you click elsewhere. Pinned, it stays so you can drag files onto it.
+    // Windows can fire a blur right after a tray click shows the window,
+    // before it ever had focus; that one is ignored.
+    if (!isMac && Date.now() - shownAt < 400) return;
+    if (!settings.onTop && !dialogOpen && win.isVisible()) {
+      win.hide();
+      hiddenAt = Date.now();
+    }
+  });
   win.on('close', (e) => {
     if (!quitting) {
       e.preventDefault();
@@ -181,15 +293,60 @@ function applyOnTop() {
   win.setAlwaysOnTop(settings.onTop, 'floating');
 }
 
-function showWindow() {
+// Puts the window next to the tray icon (above a bottom taskbar, under the
+// menu bar) until the user drags it somewhere else. The icon's bounds come
+// from the click when there was one; Windows reports zeros for a hidden or
+// just-created icon, and then the cursor is the best guess.
+function placeNearTray(clickBounds) {
+  if (!tray || !win) return false;
+  let b = clickBounds && clickBounds.width ? clickBounds : null;
+  if (!b) {
+    try {
+      b = tray.getBounds();
+    } catch {}
+  }
+  if (!b || (!b.width && !b.height)) {
+    const c = screen.getCursorScreenPoint();
+    b = { x: c.x, y: c.y, width: 1, height: 1 };
+  }
+  const display = screen.getDisplayNearestPoint({ x: b.x + Math.floor(b.width / 2), y: b.y + Math.floor(b.height / 2) });
+  const wa = display.workArea;
+  const { width, height } = win.getBounds();
+  let x = Math.round(b.x + b.width / 2 - width / 2);
+  let y;
+  if (isMac) y = wa.y + 6;
+  else if (b.y >= wa.y + wa.height - 1) y = wa.y + wa.height - height - 10; // taskbar at the bottom
+  else if (b.y + b.height <= wa.y + 1) y = wa.y + 10; // taskbar at the top
+  else {
+    y = Math.round(b.y + b.height / 2 - height / 2);
+    x = b.x >= wa.x + wa.width - 1 ? wa.x + wa.width - width - 10 : wa.x + 10; // taskbar on a side
+  }
+  x = Math.min(Math.max(x, wa.x + 8), wa.x + wa.width - width - 8);
+  y = Math.min(Math.max(y, wa.y + 8), wa.y + wa.height - height - 8);
+  placing = true;
+  win.setPosition(Math.round(x), Math.round(y));
+  setTimeout(() => (placing = false), 300);
+  return true;
+}
+
+function placeIfUnmoved(clickBounds) {
+  if (!settings.bounds) placeNearTray(clickBounds);
+}
+
+function showWindow(clickBounds) {
   if (!win) return;
+  placeIfUnmoved(clickBounds);
+  shownAt = Date.now();
   win.show();
   win.focus();
 }
 
-function toggleWindow() {
+function toggleWindow(_e, clickBounds) {
+  // A click on the tray icon blurs the window first; don't reopen what that
+  // click just closed.
+  if (Date.now() - hiddenAt < 350) return;
   if (win.isVisible() && (win.isFocused() || settings.onTop)) win.hide();
-  else showWindow();
+  else showWindow(clickBounds);
 }
 
 // Dev aid: SHELF_SNAPSHOT=/path/to.png writes a screenshot of the window.
@@ -197,12 +354,17 @@ function snapshotIfAsked() {
   const out = process.env.SHELF_SNAPSHOT;
   if (!out) return;
   setTimeout(async () => {
-    const img = await win.webContents.capturePage();
-    fs.writeFileSync(out, img.toPNG());
+    const shot = async (name) => fs.writeFileSync(name, (await win.webContents.capturePage()).toPNG());
+    await shot(out);
     if (process.env.SHELF_SNAPSHOT_SETTINGS) {
       win.webContents.send('open-settings');
       await new Promise((r) => setTimeout(r, 600));
-      fs.writeFileSync(out.replace(/\.png$/, '-settings.png'), (await win.webContents.capturePage()).toPNG());
+      await shot(out.replace(/\.png$/, '-settings.png'));
+    }
+    if (process.env.SHELF_SNAPSHOT_PHONE) {
+      win.webContents.send('open-phone');
+      await new Promise((r) => setTimeout(r, 2500));
+      await shot(out.replace(/\.png$/, '-phone.png'));
     }
     if (process.env.SHELF_SNAPSHOT_QUIT) app.quit();
   }, Number(process.env.SHELF_SNAPSHOT_DELAY || 2500));
@@ -217,6 +379,7 @@ function createTray() {
   if (isMac) img.setTemplateImage(true);
   tray = new Tray(img);
   tray.setToolTip('Shelf');
+  if (isMac) tray.setIgnoreDoubleClickEvents(true);
   tray.on('click', toggleWindow);
   tray.on('right-click', () => tray.popUpContextMenu(trayMenu()));
   updateTray();
@@ -224,7 +387,14 @@ function createTray() {
 
 function trayMenu() {
   return Menu.buildFromTemplate([
-    { label: win.isVisible() ? 'Hide Shelf' : 'Show Shelf', click: toggleWindow },
+    { label: win.isVisible() ? 'Hide Shelf' : 'Show Shelf', click: () => toggleWindow() },
+    {
+      label: 'Connect a Phone…',
+      click: () => {
+        showWindow();
+        win.webContents.send('open-phone');
+      },
+    },
     { type: 'separator' },
     {
       label: 'Keep Shelf on Top',
@@ -235,7 +405,7 @@ function trayMenu() {
     {
       label: 'Open at Login',
       type: 'checkbox',
-      checked: app.getLoginItemSettings().openAtLogin,
+      checked: opensAtLogin(),
       click: (m) => setSetting('openAtLogin', m.checked),
     },
     {
@@ -255,7 +425,7 @@ function updateTray() {
   if (!tray) return;
   const n = shelf.visible().length;
   if (isMac) tray.setTitle(n ? String(n) : '', { fontType: 'monospacedDigit' });
-  tray.setToolTip(n ? `Shelf — ${n} item${n === 1 ? '' : 's'}` : 'Shelf');
+  tray.setToolTip(n ? `Shelf: ${n} item${n === 1 ? '' : 's'}` : 'Shelf');
 }
 
 // ---- state for the window ----
@@ -270,18 +440,58 @@ function pushState() {
   }, 60);
 }
 
+function phoneAddress() {
+  const { ips, best } = net.addresses;
+  if (settings.address && ips.includes(settings.address)) return settings.address;
+  return best || ips[0] || null;
+}
+
+// The QR points at the plain http address: it opens with no certificate
+// fuss, and the page itself offers the secure address for one-tap saving
+// to Photos once the phone trusts this computer's certificate.
+function phoneUrl(withCode) {
+  const addr = phoneAddress();
+  if (!addr) return null;
+  const base = `http://${addr}:${net.port}/`;
+  const pair = net.web.pairInfo();
+  return withCode && pair ? `${base}#p=${pair.code}` : base;
+}
+
+function phoneSecureUrl() {
+  const addr = phoneAddress();
+  return addr && net.httpsPort ? `https://${addr}:${net.httpsPort}/` : null;
+}
+
+function ensureQr(text) {
+  if (!text) return null;
+  if (qrCache && qrCache.text === text) return qrCache.data;
+  if (qrCache && qrCache.text === text + ':pending') return null;
+  qrCache = { text: text + ':pending', data: null };
+  QRCode.toDataURL(text, { errorCorrectionLevel: 'M', margin: 1, width: 280, color: { dark: '#111111', light: '#ffffff' } })
+    .then((data) => {
+      qrCache = { text, data };
+      pushState();
+    })
+    .catch(() => {
+      qrCache = null;
+    });
+  return null;
+}
+
 function snapshot() {
+  const pair = net.web ? net.web.pairInfo() : null;
+  const url = phoneUrl(true);
   return {
     self: { id: settings.id, name: settings.name },
     code: net.code,
     port: net.port,
-    addresses: localAddresses(),
+    addresses: net.addresses.ips,
     version: app.getVersion(),
     settings: {
       lingerMin: settings.lingerMin,
       onTop: settings.onTop,
       popUp: settings.popUp,
-      openAtLogin: app.getLoginItemSettings().openAtLogin,
+      openAtLogin: opensAtLogin(),
     },
     items: shelf.visible().map((it) => {
       const l = shelf.local.get(it.id);
@@ -304,16 +514,38 @@ function snapshot() {
     }),
     peers: net.peerList(),
     nearby: net.nearbyList(),
+    devices: shelf.devices().map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen || d.addedAt, addedAt: d.addedAt })),
+    phone: {
+      url,
+      base: phoneUrl(false),
+      secureBase: phoneSecureUrl(),
+      qr: ensureQr(url),
+      pin: pair ? pair.pin : null,
+      expiresAt: pair ? pair.expiresAt : null,
+      address: phoneAddress(),
+      addresses: net.addresses.ips,
+      secure: !!net.httpsPort,
+      httpsError: net.httpsError ? String(net.httpsError.message || net.httpsError) : null,
+    },
   };
 }
 
 // Quick Look / shell thumbnails: a preview for images and documents, the
 // file or folder icon otherwise. app.getFileIcon is avoided on macOS because
 // it crashes Electron 44 there.
+// On Windows thumbnail extraction blocks the main thread while it runs, so
+// requests go one at a time instead of all at once when a folder of photos
+// lands.
+function thumbnail(p, size) {
+  const run = thumbQueue.then(() => nativeImage.createThumbnailFromPath(p, { width: size, height: size })).catch(() => null);
+  thumbQueue = run.then(() => {}, () => {});
+  return run;
+}
+
 async function loadIcon(it, p) {
   icons.set(it.id, null);
   try {
-    let img = await nativeImage.createThumbnailFromPath(p, { width: 96, height: 96 }).catch(() => null);
+    let img = await thumbnail(p, 96);
     if ((!img || img.isEmpty()) && !isMac) img = await app.getFileIcon(p, { size: 'large' });
     if (img && !img.isEmpty()) {
       icons.set(it.id, img.toDataURL());
@@ -322,12 +554,14 @@ async function loadIcon(it, p) {
   } catch {}
 }
 
-function localAddresses() {
-  const out = [];
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const a of list || []) if (a.family === 'IPv4' && !a.internal) out.push(a.address);
-  }
-  return out;
+// Bigger previews for the phone page. PNG keeps transparency; everything
+// else goes out as JPEG.
+async function thumbForWeb(it, p) {
+  const img = await thumbnail(p, 512);
+  if (!img || img.isEmpty()) return null;
+  const e = extOf(it.name);
+  if (e === 'png' || e === 'gif' || e === 'webp') return { buf: img.toPNG(), type: 'image/png' };
+  return { buf: img.toJPEG(82), type: 'image/jpeg' };
 }
 
 // ---- actions ----
@@ -454,17 +688,24 @@ function startDrag(sender, id) {
   }, 1000);
 }
 
-async function askToPair({ name }) {
+async function askToPair({ name, addr, signal }) {
   showWindow();
-  const { response } = await dialog.showMessageBox(win, {
-    type: 'question',
-    buttons: ['Let It Join', 'Not Now'],
-    defaultId: 0,
-    cancelId: 1,
-    message: `“${name}” wants to join your shelf`,
-    detail: 'It will see everything on this shelf, and anything it adds will show up here.',
-  });
-  return response === 0;
+  dialogOpen = true;
+  try {
+    // "Not Now" is the default so a stray Enter cannot let a stranger in.
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['Let It Join', 'Not Now'],
+      defaultId: 1,
+      cancelId: 1,
+      signal,
+      message: `“${name}” wants to join your shelf`,
+      detail: `It is at ${addr}. It will see everything on this shelf, and anything it adds will show up here.`,
+    });
+    return response === 0 && !(signal && signal.aborted);
+  } finally {
+    dialogOpen = false;
+  }
 }
 
 function setSetting(key, value) {
@@ -481,7 +722,13 @@ function setSetting(key, value) {
   } else if (key === 'popUp') {
     settings.popUp = !!value;
   } else if (key === 'openAtLogin') {
-    app.setLoginItemSettings({ openAtLogin: !!value });
+    app.setLoginItemSettings({ openAtLogin: !!value, ...loginItem() });
+  } else if (key === 'address') {
+    settings.address = value ? String(value) : null;
+    qrCache = null;
+  } else if (key === 'resetPosition') {
+    settings.bounds = null;
+    placeNearTray();
   }
   saveSettings();
   pushState();
@@ -503,40 +750,47 @@ function ipc() {
       }
     });
 
+  const idOf = (id) => {
+    if (typeof id !== 'string' || !/^[a-f0-9]{16,64}$/.test(id)) throw new Error('bad id');
+    return id;
+  };
+
   handle('state', () => snapshot());
-  handle('add-paths', (paths) => addPaths((paths || []).filter((p) => typeof p === 'string' && p)));
-  handle('add-text', (text) => shelf.addText(text));
+  handle('add-paths', (paths) => addPaths((Array.isArray(paths) ? paths : []).filter((p) => typeof p === 'string' && p)));
+  handle('add-text', (text) => shelf.addText(String(text || '')));
   handle('paste', () => paste());
-  ipcMain.on('drag', (e, id) => startDrag(e.sender, id));
-  handle('take', (id) => take(id));
-  handle('keep', (id) => shelf.keep(id));
-  handle('remove', (id) => shelf.remove(id));
+  ipcMain.on('drag', (e, id) => {
+    if (typeof id === 'string' && /^[a-f0-9]{16,64}$/.test(id)) startDrag(e.sender, id);
+  });
+  handle('take', (id) => take(idOf(id)));
+  handle('keep', (id) => shelf.keep(idOf(id)));
+  handle('remove', (id) => shelf.remove(idOf(id)));
   handle('clear-all', () => shelf.clearAll());
   handle('open', async (id) => {
-    const p = readyPath(id);
+    const p = readyPath(idOf(id));
     if (p) await shell.openPath(p);
   });
   handle('reveal', (id) => {
-    const p = readyPath(id);
+    const p = readyPath(idOf(id));
     if (p) shell.showItemInFolder(p);
   });
   handle('quick-look', (id) => {
-    const p = readyPath(id);
+    const p = readyPath(idOf(id));
     if (p && isMac) win.previewFile(p);
   });
-  handle('save', (id) => saveToDownloads(id));
+  handle('save', (id) => saveToDownloads(idOf(id)));
   handle('copy-text', (id) => {
-    const it = shelf.items.get(id);
+    const it = shelf.items.get(idOf(id));
     if (it && it.kind === 'text') {
       clipboard.writeText(it.text);
       take(id);
     }
   });
-  handle('context-menu', (id) => itemMenu(id).popup({ window: win }));
+  handle('context-menu', (id) => itemMenu(idOf(id)).popup({ window: win }));
 
-  handle('set-setting', (key, value) => setSetting(key, value));
+  handle('set-setting', (key, value) => setSetting(String(key), value));
   handle('join', async (nearbyId) => {
-    const code = await net.requestJoin(nearbyId);
+    const code = await net.requestJoin(String(nearbyId));
     setCode(code);
   });
   handle('join-code', (code) => {
@@ -552,12 +806,35 @@ function ipc() {
     return net.addAddress(host, port ? Number(port) : undefined);
   });
   handle('new-shelf', () => {
+    // A new shelf starts empty: the old items stay with the computers that
+    // keep the old code.
+    shelf.forgetAll();
     const code = newCode();
     net.setCode(code);
     setCode(code);
   });
   handle('copy-code', () => clipboard.writeText(net.code));
   handle('hide', () => win.hide());
+
+  // phones
+  handle('phone-refresh', () => {
+    net.web.newPair();
+    qrCache = null;
+    pushState();
+    return snapshot().phone;
+  });
+  handle('phone-copy-url', () => {
+    const url = phoneUrl(true);
+    if (!url) throw new Error('No network address yet');
+    clipboard.writeText(url);
+  });
+  handle('phone-open', () => {
+    const url = phoneUrl(true);
+    if (!url) throw new Error('No network address yet');
+    return shell.openExternal(url);
+  });
+  handle('device-remove', (id) => shelf.removeDevice(idOf(id)));
+  handle('device-rename', (id, name) => shelf.renameDevice(idOf(id), String(name || '')));
 }
 
 function itemMenu(id) {
@@ -565,13 +842,19 @@ function itemMenu(id) {
   if (!it) return Menu.buildFromTemplate([]);
   const ready = it.kind === 'text' || !!readyPath(id);
   const revealLabel = isMac ? 'Show in Finder' : 'Show in File Explorer';
+  // The item can leave the shelf while the menu is open; look again on click.
+  const withPath = (fn) => () => {
+    const p = readyPath(id);
+    if (p) fn(p);
+    else flash('That item is no longer on the shelf');
+  };
   const template = [];
   if (it.kind === 'text') {
     template.push({ label: 'Copy Text', click: () => { clipboard.writeText(it.text); take(id); } });
   } else {
-    template.push({ label: 'Open', enabled: ready, click: () => shell.openPath(readyPath(id)) });
-    if (isMac) template.push({ label: 'Quick Look', enabled: ready, click: () => win.previewFile(readyPath(id)) });
-    template.push({ label: revealLabel, enabled: ready, click: () => shell.showItemInFolder(readyPath(id)) });
+    template.push({ label: 'Open', enabled: ready, click: withPath((p) => shell.openPath(p)) });
+    if (isMac) template.push({ label: 'Quick Look', enabled: ready, click: withPath((p) => win.previewFile(p)) });
+    template.push({ label: revealLabel, enabled: ready, click: withPath((p) => shell.showItemInFolder(p)) });
   }
   template.push({ label: 'Save to Downloads', enabled: ready, click: () => saveToDownloads(id) });
   template.push({ type: 'separator' });

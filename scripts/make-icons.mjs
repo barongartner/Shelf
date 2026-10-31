@@ -57,4 +57,9 @@ render(appIcon, 32, 'assets/tray-win.png');
 render(trayTemplate, 16, 'assets/trayTemplate.png');
 render(trayTemplate, 32, 'assets/trayTemplate@2x.png');
 render(dragImage, 48, 'assets/drag.png');
+// Home-screen and favicon images for the phone page, drawn edge to edge
+// (iOS rounds the corners itself).
+const webIcon = fs.readFileSync('src/web/icon.svg', 'utf8');
+render(webIcon, 180, 'src/web/icon-180.png');
+render(webIcon, 512, 'src/web/icon-512.png');
 console.log('icons written');

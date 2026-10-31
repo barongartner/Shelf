@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('shelf', {
   onState: (cb) => ipcRenderer.on('state', (_e, s) => cb(s)),
   onFlash: (cb) => ipcRenderer.on('flash', (_e, msg) => cb(msg)),
   onOpenSettings: (cb) => ipcRenderer.on('open-settings', () => cb()),
+  onOpenPhone: (cb) => ipcRenderer.on('open-phone', () => cb()),
   pathFor: (file) => webUtils.getPathForFile(file),
 
   addPaths: call('add-paths'),
@@ -34,4 +35,10 @@ contextBridge.exposeInMainWorld('shelf', {
   newShelf: call('new-shelf'),
   copyCode: call('copy-code'),
   hide: call('hide'),
+
+  phoneRefresh: call('phone-refresh'),
+  phoneCopyUrl: call('phone-copy-url'),
+  phoneOpen: call('phone-open'),
+  deviceRemove: call('device-remove'),
+  deviceRename: call('device-rename'),
 });

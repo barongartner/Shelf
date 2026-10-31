@@ -7,6 +7,7 @@ const thisComputer = isMac ? 'This Mac' : 'This PC';
 
 let state = null;
 let selected = null;
+let view = 'shelf'; // shelf | settings | phone
 let internalDrag = null; // id of a text item being dragged from the shelf
 const rows = new Map(); // id -> { el, parts }
 const seenIds = new Set();
@@ -49,11 +50,18 @@ function fmtSize(n) {
 }
 
 function fmtLeft(ms) {
-  if (ms <= 0) return 'Leaving…';
+  if (ms <= 0) return 'Leaving';
   const s = Math.ceil(ms / 1000);
   if (s < 600) return `Leaves in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   if (s < 3600) return `Leaves in ${Math.round(s / 60)} min`;
   return `Leaves in ${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+
+function fmtWhen(t) {
+  const d = new Date(t);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
 function ext(name) {
@@ -81,7 +89,7 @@ async function run(promise) {
 function metaFor(it) {
   if (it.state === 'downloading') {
     const pct = it.size ? Math.min(99, Math.floor((it.got / it.size) * 100)) : 0;
-    return `Arriving… ${pct}% of ${fmtSize(it.size)}`;
+    return `Arriving, ${pct}% of ${fmtSize(it.size)}`;
   }
   if (it.state === 'missing') return `Waiting for ${it.from || 'another computer'}`;
   const bits = [];
@@ -170,10 +178,12 @@ function buildRow(it) {
 
 function updateRow(row, it) {
   const { el: li, parts, key } = row;
-  li.className = 'item kind-' + it.kind;
-  if (it.state !== 'ready') li.classList.add('waiting');
-  if (it.expiresAt) li.classList.add('leaving');
-  if (selected === it.id) li.classList.add('selected');
+  // Toggle classes instead of rewriting className, so the arrival animation
+  // class survives the first update.
+  for (const k of ['file', 'folder', 'text']) li.classList.toggle('kind-' + k, it.kind === k);
+  li.classList.toggle('waiting', it.state !== 'ready');
+  li.classList.toggle('leaving', !!it.expiresAt);
+  li.classList.toggle('selected', selected === it.id);
 
   const thumbKey = `${it.icon ? it.icon.length : 0}:${it.kind}:${it.name}`;
   if (key.thumb !== thumbKey) {
@@ -247,11 +257,12 @@ function renderItems() {
   const empty = state.items.length === 0;
   $('empty').hidden = !empty;
   const others = state.peers.filter((p) => p.online).length;
-  $('empty-sub').textContent = others
-    ? 'They show up on your other computers right away.'
+  const phones = state.devices.length;
+  $('empty-sub').textContent = others || phones
+    ? 'They show up on your other computers and your phone right away.'
     : state.nearby.length
       ? `${state.nearby[0].name} is nearby. Open Settings to join it.`
-      : 'Open Shelf on another computer on this network, then join from Settings.';
+      : 'Connect a phone with the phone button above, or open Shelf on another computer and join from Settings.';
 }
 
 function select(id) {
@@ -267,9 +278,10 @@ setInterval(() => {
       if (row) updateCountdown(row, it);
     }
   }
+  if (view === 'phone') renderPairExpiry();
 }, 1000);
 
-// ---- footer and settings ----
+// ---- footer and views ----
 
 function renderFooter() {
   const box = $('peers-summary');
@@ -284,19 +296,27 @@ function renderFooter() {
     box.appendChild(chip);
   }
   if (state.peers.length > shown.length) box.appendChild(el('span', null, `+${state.peers.length - shown.length}`));
-  if (state.nearby.length && !settingsOpen()) box.appendChild(el('span', 'nearby-chip', `${state.nearby.length} nearby`));
+  if (state.devices.length) {
+    const n = state.devices.length;
+    box.appendChild(el('span', 'phones-chip', `${n} phone${n === 1 ? '' : 's'}`));
+  }
+  if (state.nearby.length && view === 'shelf') box.appendChild(el('span', 'nearby-chip', `${state.nearby.length} nearby`));
 }
 
-function settingsOpen() {
-  return !$('settings-view').hidden;
-}
-
-function openSettings(open) {
-  $('settings-view').hidden = !open;
-  $('shelf-view').hidden = open;
-  $('btn-done').hidden = !open;
-  $('btn-settings').classList.toggle('on', open);
-  if (open) renderSettings(true);
+function showView(name) {
+  view = name;
+  $('shelf-view').hidden = name !== 'shelf';
+  $('settings-view').hidden = name !== 'settings';
+  $('phone-view').hidden = name !== 'phone';
+  $('btn-done').hidden = name === 'shelf';
+  $('btn-settings').classList.toggle('on', name === 'settings');
+  $('btn-phone').classList.toggle('on', name === 'phone');
+  if (name === 'settings') renderSettings(true);
+  if (name === 'phone') {
+    renderPhone();
+    const p = state && state.phone;
+    if (!p || !p.expiresAt || p.expiresAt - Date.now() < 60 * 1000) run(api.phoneRefresh());
+  }
   renderFooter();
 }
 
@@ -345,11 +365,91 @@ function renderSettings(full) {
   }
 }
 
+function renderPairExpiry() {
+  const p = state && state.phone;
+  const out = $('pair-expiry');
+  if (!p || !p.expiresAt) {
+    out.textContent = '';
+    return;
+  }
+  const left = p.expiresAt - Date.now();
+  if (left <= 0) {
+    out.textContent = 'This code has expired.';
+    if (view === 'phone' && !renderPairExpiry.refreshing) {
+      renderPairExpiry.refreshing = true;
+      run(api.phoneRefresh()).finally(() => (renderPairExpiry.refreshing = false));
+    }
+    return;
+  }
+  const s = Math.ceil(left / 1000);
+  out.textContent = `This code works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}.`;
+}
+
+function renderPhone() {
+  if (!state) return;
+  const p = state.phone;
+  const img = $('qr');
+  const ph = $('qr-placeholder');
+  if (p.qr && p.url) {
+    img.src = p.qr;
+    img.hidden = false;
+    ph.hidden = true;
+  } else {
+    img.hidden = true;
+    ph.hidden = false;
+    ph.textContent = p.address ? 'Making the code' : 'No network';
+  }
+  $('phone-base').textContent = p.base || '';
+  $('phone-pin').textContent = p.pin ? `${p.pin.slice(0, 3)} ${p.pin.slice(3)}` : '';
+  renderPairExpiry();
+
+  const problem = $('phone-problem');
+  if (!p.address) {
+    problem.hidden = false;
+    problem.textContent = 'This computer has no network address. Connect it to Wi-Fi or Ethernet first.';
+  } else if (!p.secure) {
+    problem.hidden = false;
+    problem.textContent = `The secure address could not be started${p.httpsError ? ` (${p.httpsError})` : ''}. The phone still works; only one-tap saving to its Photos app needs the secure address.`;
+  } else problem.hidden = true;
+
+  const field = $('addr-field');
+  const sel = $('phone-addr');
+  field.hidden = p.addresses.length < 2;
+  if (p.addresses.length >= 2) {
+    const want = p.addresses.join('|');
+    if (sel.dataset.key !== want) {
+      sel.dataset.key = want;
+      sel.replaceChildren();
+      for (const a of p.addresses) sel.appendChild(new Option(a, a));
+    }
+    sel.value = p.address;
+  }
+
+  const list = $('device-list');
+  list.replaceChildren();
+  if (!state.devices.length) {
+    const li = el('li');
+    li.append(el('span', 'sub', 'No phones yet. Scan the code above.'));
+    list.appendChild(li);
+  }
+  for (const d of state.devices) {
+    const li = el('li');
+    const btn = el('button', 'btn small', 'Remove');
+    btn.title = `${d.name} will no longer be able to open this shelf`;
+    btn.addEventListener('click', () => {
+      if (confirm(`Remove ${d.name} from the shelf? It will need to scan the code again.`)) run(api.deviceRemove(d.id));
+    });
+    li.append(el('span', 'dot on'), el('span', 'grow', d.name), el('span', 'sub', `seen ${fmtWhen(d.lastSeen)}`), btn);
+    list.appendChild(li);
+  }
+}
+
 $('set-name').addEventListener('change', (e) => run(api.setSetting('name', e.target.value)));
 $('set-linger').addEventListener('change', (e) => run(api.setSetting('lingerMin', Number(e.target.value))));
 $('set-popup').addEventListener('change', (e) => run(api.setSetting('popUp', e.target.checked)));
 $('set-ontop').addEventListener('change', (e) => run(api.setSetting('onTop', e.target.checked)));
 $('set-login').addEventListener('change', (e) => run(api.setSetting('openAtLogin', e.target.checked)));
+$('btn-reset-pos').addEventListener('click', () => run(api.setSetting('resetPosition', true)));
 $('btn-copy-code').addEventListener('click', () => {
   run(api.copyCode());
   toast('Shelf code copied');
@@ -377,12 +477,21 @@ $('btn-clear').addEventListener('click', () => {
   if (confirm(`Remove all ${state.items.length} items from the shelf on every computer?`)) run(api.clearAll());
 });
 
-$('btn-settings').addEventListener('click', () => openSettings(!settingsOpen()));
-$('btn-done').addEventListener('click', () => openSettings(false));
-$('peers-summary').addEventListener('click', () => openSettings(true));
+$('btn-copy-url').addEventListener('click', async () => {
+  const r = await run(api.phoneCopyUrl());
+  if (r.ok) toast('Link copied. It works once, from a phone on this network.');
+});
+$('btn-new-code').addEventListener('click', () => run(api.phoneRefresh()));
+$('phone-addr').addEventListener('change', (e) => run(api.setSetting('address', e.target.value)));
+
+$('btn-settings').addEventListener('click', () => showView(view === 'settings' ? 'shelf' : 'settings'));
+$('btn-phone').addEventListener('click', () => showView(view === 'phone' ? 'shelf' : 'phone'));
+$('btn-done').addEventListener('click', () => showView('shelf'));
+$('peers-summary').addEventListener('click', () => showView('settings'));
 $('btn-hide').addEventListener('click', () => api.hide());
 $('btn-pin').addEventListener('click', () => run(api.setSetting('onTop', !state.settings.onTop)));
-api.onOpenSettings(() => openSettings(true));
+api.onOpenSettings(() => showView('settings'));
+api.onOpenPhone(() => showView('phone'));
 
 // ---- drop, paste, keys ----
 
@@ -407,7 +516,7 @@ window.addEventListener('drop', (e) => {
   dragDepth = 0;
   overlay.hidden = true;
   if (internalDrag) return;
-  if (settingsOpen()) openSettings(false);
+  if (view !== 'shelf') showView('shelf');
   const paths = [...e.dataTransfer.files].map((f) => api.pathFor(f)).filter(Boolean);
   if (paths.length) return run(api.addPaths(paths));
   const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text/uri-list');
@@ -420,16 +529,16 @@ document.addEventListener('keydown', (e) => {
   const mod = isMac ? e.metaKey : e.ctrlKey;
   if (mod && e.key.toLowerCase() === 'v') {
     e.preventDefault();
-    if (settingsOpen()) openSettings(false);
+    if (view !== 'shelf') showView('shelf');
     run(api.paste());
     return;
   }
   if (e.key === 'Escape') {
-    if (settingsOpen()) openSettings(false);
+    if (view !== 'shelf') showView('shelf');
     else api.hide();
     return;
   }
-  if (!state || settingsOpen()) return;
+  if (!state || view !== 'shelf') return;
   const ids = state.items.map((i) => i.id);
   const idx = ids.indexOf(selected);
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -467,7 +576,8 @@ function apply(s) {
   $('btn-pin').title = s.settings.onTop ? 'Kept on top (click to stop)' : 'Keep on top';
   renderItems();
   renderFooter();
-  if (settingsOpen()) renderSettings(false);
+  if (view === 'settings') renderSettings(false);
+  if (view === 'phone') renderPhone();
 }
 
 api.onState(apply);

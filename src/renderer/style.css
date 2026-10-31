@@ -39,6 +39,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -615,4 +619,95 @@ select:focus {
 ::-webkit-scrollbar-thumb {
   background: var(--line);
   border-radius: 4px;
+}
+
+/* ---- phone panel ---- */
+
+#phone-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#phone-view[hidden] {
+  display: none;
+}
+.qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  background: var(--card);
+  border-radius: 12px;
+  padding: 14px 14px 10px;
+  box-shadow: 0 0 0 0.5px var(--line);
+}
+.qr-box {
+  width: 196px;
+  height: 196px;
+  border-radius: 10px;
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 0 0 0.5px var(--line);
+}
+.qr-box img {
+  width: 184px;
+  height: 184px;
+  display: block;
+  image-rendering: pixelated;
+}
+.qr-placeholder {
+  width: 184px;
+  height: 184px;
+  display: grid;
+  place-items: center;
+  color: #6c6c78;
+  font-size: 12px;
+}
+.qr-steps {
+  margin: 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--muted);
+  max-width: 260px;
+}
+.qr-steps b {
+  color: var(--text);
+  font-weight: 600;
+}
+.pin-row {
+  margin-top: 10px;
+  align-items: flex-start;
+}
+.pin-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+.code.small {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  word-break: break-all;
+  color: var(--muted);
+}
+.code.pin {
+  font-size: 22px;
+  letter-spacing: 0.12em;
+  margin-top: 2px;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
+}
+.hint.problem {
+  color: var(--warn);
+}
+.phones-chip {
+  color: var(--muted);
+}
+.peer-list .btn.small {
+  padding: 1px 8px;
+  font-size: 11.5px;
 }

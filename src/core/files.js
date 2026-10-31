@@ -3,6 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 
+// A folder with more entries than this cannot go on the shelf: its manifest
+// travels inside every sync.
+const MAX_ENTRIES = 50000;
+
 // Describes a dropped path as a shelf item: a single file, or a folder with a
 // manifest of every regular file and directory inside it. Symlinks and special
 // files are skipped so a folder can't pull in things outside itself.
@@ -19,6 +23,7 @@ async function describe(p) {
     const entries = await fs.promises.readdir(abs, { withFileTypes: true });
     for (const e of entries) {
       if (e.name === '.DS_Store') continue;
+      if (files.length + dirs.length >= MAX_ENTRIES) throw new Error(`${name} has too many files for the shelf (over ${MAX_ENTRIES.toLocaleString()})`);
       const childAbs = path.join(abs, e.name);
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) {
@@ -45,6 +50,28 @@ function safeJoin(base, rel) {
     throw new Error('path escapes item');
   }
   return target;
+}
+
+// The file a folder item's manifest entry points at on this computer: the
+// path as listed, or its cleaned-up form on a computer that downloaded the
+// folder. Only entries in the manifest are served, and never through a link.
+async function manifestFile(it, root, rel) {
+  if (typeof rel !== 'string' || !rel) return null;
+  if (!(it.files || []).some((f) => f.p === rel)) return null;
+  for (const candidate of [rel, safeRel(rel)]) {
+    let file;
+    try {
+      file = safeJoin(root, candidate);
+    } catch {
+      return null;
+    }
+    try {
+      const st = await fs.promises.lstat(file);
+      if (st.isFile()) return file;
+      if (st.isSymbolicLink()) return null;
+    } catch {}
+  }
+  return null;
 }
 
 // Copy that clones on APFS (instant, no extra disk) and falls back to a real
@@ -89,4 +116,4 @@ function safeRel(rel) {
   return String(rel).split('/').map(safeName).join('/');
 }
 
-module.exports = { describe, safeJoin, safeRel, cloneCopy, isInside, exists, safeName };
+module.exports = { describe, safeJoin, manifestFile, safeRel, cloneCopy, isInside, exists, safeName, MAX_ENTRIES };
