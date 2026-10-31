@@ -370,6 +370,11 @@ function renderPairExpiry() {
   const out = $('pair-expiry');
   if (!p || !p.expiresAt) {
     out.textContent = '';
+    // The code was used or ran out while the panel is open: make a new one.
+    if (p && p.address && view === 'phone' && !renderPairExpiry.refreshing) {
+      renderPairExpiry.refreshing = true;
+      run(api.phoneRefresh()).finally(() => (renderPairExpiry.refreshing = false));
+    }
     return;
   }
   const left = p.expiresAt - Date.now();
@@ -438,8 +443,9 @@ function renderPhone() {
     const li = el('li');
     const btn = el('button', 'btn small', 'Remove');
     btn.title = `${d.name} will no longer be able to open this shelf`;
-    btn.addEventListener('click', () => {
-      if (confirm(`Remove ${d.name} from the shelf? It will need to scan the code again.`)) run(api.deviceRemove(d.id));
+    btn.addEventListener('click', async () => {
+      const r = await api.confirm(`Remove ${d.name} from the shelf?`, 'It will need to scan the code again.');
+      if (r.ok && r.value) run(api.deviceRemove(d.id));
     });
     li.append(el('span', 'dot on'), el('span', 'grow', d.name), el('span', 'sub', `seen ${fmtWhen(d.lastSeen)}`), btn);
     list.appendChild(li);
@@ -471,12 +477,13 @@ $('btn-add-ip').addEventListener('click', async () => {
   }
 });
 $('btn-new-shelf').addEventListener('click', async () => {
-  if (!confirm('Start a new, empty shelf? This computer stops sharing with the others until you join again.')) return;
-  run(api.newShelf());
+  const r = await api.confirm('Start a new, empty shelf?', 'This computer stops sharing with the others until you join again.');
+  if (r.ok && r.value) run(api.newShelf());
 });
-$('btn-clear').addEventListener('click', () => {
+$('btn-clear').addEventListener('click', async () => {
   if (!state.items.length) return;
-  if (confirm(`Remove all ${state.items.length} items from the shelf on every computer?`)) run(api.clearAll());
+  const r = await api.confirm(`Remove all ${state.items.length} items from the shelf on every computer?`);
+  if (r.ok && r.value) run(api.clearAll());
 });
 
 $('btn-copy-url').addEventListener('click', async () => {

@@ -63,7 +63,8 @@ async function manifestFile(it, root, rel) {
     try {
       file = safeJoin(root, candidate);
     } catch {
-      return null;
+      // A Mac name Windows cannot resolve as given; the cleaned form may.
+      continue;
     }
     try {
       const st = await fs.promises.lstat(file);

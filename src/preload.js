@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('shelf', {
   newShelf: call('new-shelf'),
   copyCode: call('copy-code'),
   hide: call('hide'),
+  confirm: call('confirm'),
 
   phoneRefresh: call('phone-refresh'),
   phoneCopyUrl: call('phone-copy-url'),

@@ -480,7 +480,8 @@ function ensureQr(text) {
 
 function snapshot() {
   const pair = net.web ? net.web.pairInfo() : null;
-  const url = phoneUrl(true);
+  // No live code, no QR: a code-less link would pair nobody.
+  const url = pair ? phoneUrl(true) : null;
   return {
     self: { id: settings.id, name: settings.name },
     code: net.code,
@@ -760,6 +761,24 @@ function ipc() {
   };
 
   handle('state', () => snapshot());
+  // The renderer's questions come through here so the blur-to-hide rule
+  // knows a dialog is up and leaves the window alone.
+  handle('confirm', async (message, detail) => {
+    dialogOpen = true;
+    try {
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'question',
+        buttons: ['OK', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        message: String(message || '').slice(0, 200),
+        detail: detail ? String(detail).slice(0, 400) : undefined,
+      });
+      return response === 0;
+    } finally {
+      dialogOpen = false;
+    }
+  });
   handle('add-paths', (paths) => addPaths((Array.isArray(paths) ? paths : []).filter((p) => typeof p === 'string' && p)));
   handle('add-text', (text) => shelf.addText(String(text || '')));
   handle('paste', () => paste());

@@ -19,6 +19,7 @@ const PAIR_LOCK_MS = 60 * 1000;
 const PAIR_LOCK_AFTER = 8;
 const TEXT_LIMIT = 256 * 1024;
 const MAX_THUMBS = 400;
+const UPLOAD_IDLE_MS = 60 * 1000;
 const MANIFEST_LIMIT = 2000;
 
 // Safari asks for the home-screen icon at these root paths on its own, with
@@ -130,7 +131,10 @@ class Web {
     this.thumbs = new Map(); // id -> { buf, type } | null
     this.thumbPending = new Map();
     this.listeners = [];
-    this._onChange = () => this.broadcast();
+    this._onChange = () => {
+      this._dropRevoked();
+      this.broadcast();
+    };
     this._onDropped = (id) => {
       this.thumbs.delete(id);
       this.thumbPending.delete(id);
@@ -173,8 +177,9 @@ class Web {
     const p = this.pairInfo() && this.pair;
     const code = normCode(body.code);
     const pin = String(body.pin || '').replace(/\D/g, '');
-    const ok = p && ((code && safeEqual(code, p.code)) || (pin && safeEqual(pin, p.pin)));
-    if (!ok) {
+    const codeOk = !!p && code.length === 20 && safeEqual(code, p.code);
+    const pinOk = !!p && !p.pinLocked && pin.length === 6 && safeEqual(pin, p.pin);
+    if (!codeOk && !pinOk) {
       const recent = f && now - f.last < PAIR_LOCK_MS * 10;
       const next = { n: (recent ? f.n : 0) + 1, last: now, until: 0 };
       if (next.n >= PAIR_LOCK_AFTER) {
@@ -182,8 +187,12 @@ class Web {
         next.n = 0;
       }
       this.fails.set(ip, next);
-      if (p && ++p.tries >= PAIR_MAX_TRIES) this.pair = null;
-      return { status: 403, error: p ? 'That code is not right.' : 'That code has expired. Show the QR code again on your computer.' };
+      // Only the six digits can be guessed, so only real guesses at them count,
+      // and they lock the digits alone: the long code on the QR keeps working.
+      if (p && pin.length === 6 && ++p.tries >= PAIR_MAX_TRIES) p.pinLocked = true;
+      let error = 'That code has expired. Show the QR code again on your computer.';
+      if (p) error = p.pinLocked ? 'Too many wrong codes. Scan the QR code instead, or show a new code on your computer.' : 'That code is not right.';
+      return { status: 403, error };
     }
     this.pair = null;
     this.fails.delete(ip);
@@ -261,17 +270,30 @@ class Web {
     };
   }
 
+  // A phone that was removed is cut off, open stream or not.
+  _dropRevoked() {
+    for (const c of [...this.clients]) {
+      const d = this.shelf.items.get(c.shelfDevice);
+      if (!d || d.removed) {
+        this.clients.delete(c);
+        c.end();
+      }
+    }
+  }
+
   broadcast() {
     if (!this.clients.size || this._broadcastTimer) return;
     this._broadcastTimer = setTimeout(() => {
       this._broadcastTimer = null;
+      this._dropRevoked();
       if (!this.clients.size) return;
       const data = JSON.stringify(this.snapshot());
       for (const c of this.clients) c.write(`event: state\ndata: ${data}\n\n`);
     }, 80);
   }
 
-  _sse(req, res) {
+  _sse(req, res, device) {
+    res.shelfDevice = device.id;
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-store',
@@ -284,6 +306,7 @@ class Web {
       // A real event, not a comment: the page uses it to notice a stream iOS
       // killed without saying so.
       this._heart = setInterval(() => {
+        this._dropRevoked();
         for (const c of this.clients) c.write('event: ping\ndata: 1\n\n');
       }, 20000);
     }
@@ -460,13 +483,16 @@ class Web {
     if (!device) return send(res, 401, { error: 'not paired' }), true;
 
     if (p === '/api/state' && get) return send(res, 200, this.snapshot()), true;
-    if (p === '/api/events' && get) return this._sse(req, res), true;
+    if (p === '/api/events' && get) return this._sse(req, res, device), true;
 
     if (p === '/api/upload' && (method === 'PUT' || method === 'POST')) {
       const name = url.searchParams.get('name');
       if (!name) return send(res, 400, { error: 'name is required' }), true;
       const size = Number(url.searchParams.get('size')) || Number(req.headers['content-length']) || 0;
       const mtime = Number(url.searchParams.get('mtime')) || null;
+      // Nothing arriving for a minute means the phone is gone; the upload is
+      // cut so its item disappears everywhere instead of arriving forever.
+      req.socket.setTimeout(UPLOAD_IDLE_MS, () => req.destroy(new Error('upload stalled')));
       try {
         const it = await this.shelf.addUpload({ name, size, stream: req, by: { id: device.id, name: device.name }, mtime });
         return send(res, 201, { item: this.itemView(it) }), true;
@@ -474,6 +500,10 @@ class Web {
         if (!res.headersSent) send(res, 500, { error: err.message || 'upload failed' });
         else res.destroy();
         return true;
+      } finally {
+        try {
+          req.socket.setTimeout(0);
+        } catch {}
       }
     }
 

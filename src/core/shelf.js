@@ -9,7 +9,9 @@ const { pipeline } = require('stream/promises');
 const files = require('./files');
 
 const TEXT_LIMIT = 256 * 1024;
-const TOMBSTONE_TTL = 180 * 24 * 60 * 60 * 1000;
+// Tombstones are tiny, so they are kept for years: a computer that was away
+// for however long cannot bring back what was removed.
+const TOMBSTONE_TTL = 10 * 365 * 24 * 60 * 60 * 1000;
 const DEVICE_TOUCH_EVERY = 10 * 60 * 1000;
 // A computer that did not set an item's linger time waits this long past it
 // before giving up on hearing the removal from the one that did, so a fast
@@ -68,12 +70,22 @@ class Shelf extends EventEmitter {
       const clean = sanitizeRemote(it, { trustTime: true });
       if (clean) this.items.set(clean.id, clean);
     }
-    for (const it of this.items.values()) {
+    const savedLocal = saved.local || {};
+    for (const it of [...this.items.values()]) {
       if (it.removed || it.kind === 'text' || it.kind === 'device') continue;
-      const p = (saved.local || {})[it.id] || this.storePath(it);
-      this.local.set(it.id, { path: p, state: (await files.exists(p)) ? 'ready' : 'missing', got: 0 });
+      const entry = savedLocal[it.id];
+      const rec = typeof entry === 'string' ? { path: entry } : entry || {};
+      const p = rec.path || this.storePath(it);
+      const present = await files.exists(p);
+      if (rec.uploading && !present) {
+        // The app died while a phone was sending this; it can never finish.
+        this._tombstone(it);
+        continue;
+      }
+      this.local.set(it.id, { path: p, state: present ? 'ready' : 'missing', got: 0 });
     }
-    if (!unreadable) await this._cleanStore();
+    if (unreadable) await this._rebuildFromStore();
+    else await this._cleanStore();
     for (const name of await fs.promises.readdir(this.dataDir).catch(() => [])) {
       if (/^shelf\.json\..*\.tmp$/.test(name)) await fs.promises.rm(path.join(this.dataDir, name), { force: true }).catch(() => {});
     }
@@ -151,7 +163,7 @@ class Shelf extends EventEmitter {
     const dir = path.dirname(dst);
     const tmp = path.join(dir, '.partial-' + path.basename(dst));
     await fs.promises.mkdir(dir, { recursive: true });
-    this.local.set(it.id, { path: dst, state: 'downloading', got: 0 });
+    this.local.set(it.id, { path: dst, state: 'downloading', got: 0, uploading: true });
     await this._putLocal(it);
     if (by) this.emit('arrived', it);
     let got = 0;
@@ -186,7 +198,7 @@ class Shelf extends EventEmitter {
       throw new Error('removed while uploading');
     }
     if (cur.size !== got) this._update(cur, { size: got });
-    this.setLocal(it.id, { state: 'ready', got, path: dst });
+    this.setLocal(it.id, { state: 'ready', got, path: dst, uploading: false });
     return this.items.get(it.id);
   }
 
@@ -285,9 +297,6 @@ class Shelf extends EventEmitter {
       const l = this.items.get(r.id);
       if (!l) {
         if (!r.removed && r.expiresAt && r.expiresAt <= now) continue;
-        // Older than any tombstone we would still hold: a computer that was
-        // away for months is offering something long since removed.
-        if (!r.removed && now - r.addedAt > TOMBSTONE_TTL) continue;
         this.items.set(r.id, r);
         if (!r.removed && r.kind !== 'device') this.emit('arrived', r);
         changed = true;
@@ -307,6 +316,8 @@ class Shelf extends EventEmitter {
   // Expires lingering items and forgets old tombstones. Run every few seconds.
   sweep() {
     const now = Date.now();
+    this._sweeps = (this._sweeps || 0) + 1;
+    if (this._sweeps % 5 === 0) this._reprobe().catch(() => {});
     for (const it of [...this.items.values()]) {
       if (!it.removed && it.expiresAt) {
         const grace = it.vBy === this.self.id ? 0 : LINGER_GRACE;
@@ -404,7 +415,7 @@ class Shelf extends EventEmitter {
     for (const name of entries) {
       const it = this.items.get(name);
       const l = this.local.get(name);
-      const keep = it && !it.removed && l && l.state === 'ready' && files.isInside(l.path, this.storeDir);
+      const keep = it && !it.removed && l && (l.state === 'ready' || l.state === 'missing') && files.isInside(l.path, this.storeDir);
       if (!keep) await fs.promises.rm(path.join(this.storeDir, name), { recursive: true, force: true });
     }
   }
@@ -429,11 +440,53 @@ class Shelf extends EventEmitter {
 
   async _writeState() {
     const local = {};
-    for (const [id, l] of this.local) if (l.path && l.state === 'ready') local[id] = l.path;
+    for (const [id, l] of this.local) if (l.path) local[id] = { path: l.path, state: l.state, uploading: !!l.uploading };
     const data = JSON.stringify({ items: [...this.items.values()], local });
     const tmp = `${this.statePath}.${process.pid}.${++this._saveSeq}.tmp`;
-    await fs.promises.writeFile(tmp, data);
+    const fh = await fs.promises.open(tmp, 'w');
+    try {
+      await fh.writeFile(data);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
     await fs.promises.rename(tmp, this.statePath);
+  }
+
+  // A file dropped in place that went missing (an unplugged drive) is
+  // looked for again, so plugging it back in is enough.
+  async _reprobe() {
+    for (const [id, l] of this.local) {
+      if (l.state !== 'missing' || !l.path || files.isInside(l.path, this.storeDir)) continue;
+      if (await files.exists(l.path)) this.setLocal(id, { state: 'ready', got: 0 });
+    }
+  }
+
+  // With the item list lost, whatever the store still holds becomes items
+  // again, so nothing a phone sent is thrown away.
+  async _rebuildFromStore() {
+    let entries = [];
+    try {
+      entries = await fs.promises.readdir(this.storeDir);
+    } catch {}
+    for (const id of entries) {
+      if (!/^[a-f0-9]{16,64}$/.test(id) || this.items.has(id)) continue;
+      const dir = path.join(this.storeDir, id);
+      let names = [];
+      try {
+        names = (await fs.promises.readdir(dir)).filter((n) => !n.startsWith('.partial-'));
+      } catch {
+        continue;
+      }
+      if (names.length !== 1) continue;
+      try {
+        const p = path.join(dir, names[0]);
+        const desc = await files.describe(p);
+        this.items.set(id, { ...this._newItem(desc), id });
+        this.local.set(id, { path: p, state: 'ready', got: 0 });
+      } catch {}
+    }
+    if (entries.length) this._save();
   }
 }
 

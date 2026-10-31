@@ -24,6 +24,7 @@ let es = null;
 let online = false;
 let lastSyncAt = 0;
 let fromCache = false;
+let cookieOk = false; // the computer's cookie signs requests on its own
 let selecting = false;
 let viewing = null;
 let suppressClick = false;
@@ -74,8 +75,8 @@ function fmtLeft(ms) {
   if (ms <= 0) return 'Leaving';
   const s = Math.ceil(ms / 1000);
   if (s < 600) return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  if (s < 3600) return `${Math.round(s / 60)} min`;
-  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
 }
 
 function fmtWhen(t) {
@@ -105,11 +106,23 @@ function auth() {
   return token ? { authorization: 'Bearer ' + token } : {};
 }
 
+// Links the browser follows on its own (images, downloads, the event stream)
+// carry the token only until the cookie is known to work, so it does not end
+// up in download histories and file metadata.
 function withToken(path) {
+  if (cookieOk) return path;
   return `${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token || '')}`;
 }
 
+async function probeCookie() {
+  try {
+    const r = await fetch('/api/me', { cache: 'no-store' }).then((x) => x.json());
+    cookieOk = !!(r && r.paired);
+  } catch {}
+}
+
 async function api(path, { method = 'GET', body } = {}) {
+  const at = token;
   const r = await fetch(path, {
     method,
     headers: { ...auth(), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
@@ -120,7 +133,9 @@ async function api(path, { method = 'GET', body } = {}) {
     json = await r.json();
   } catch {}
   if (r.status === 401) {
-    onUnpaired();
+    // Only a refusal of the token in use now means anything; a late answer
+    // to a request made with an old one is just late.
+    if (token === at) onUnpaired();
     throw new Error('Not connected');
   }
   if (!r.ok) throw new Error((json && json.error) || `Something went wrong (${r.status})`);
@@ -282,6 +297,7 @@ function enterApp({ cached = null, offline = false } = {}) {
   renderSettings();
   if (offline) setOnline(false);
   connect();
+  probeCookie();
   maybeShowHomeCard();
 }
 
@@ -599,6 +615,7 @@ function wireItem(node, id) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     sx = e.clientX;
     sy = e.clientY;
+    suppressClick = false;
     cancel();
     timer = setTimeout(() => {
       timer = null;
@@ -612,7 +629,10 @@ function wireItem(node, id) {
     if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 8) cancel();
   });
   node.addEventListener('pointerup', cancel);
-  node.addEventListener('pointercancel', cancel);
+  node.addEventListener('pointercancel', () => {
+    cancel();
+    suppressClick = false;
+  });
   node.addEventListener('pointerleave', cancel);
   node.addEventListener('contextmenu', (e) => e.preventDefault());
   node.addEventListener('click', () => {
@@ -653,7 +673,8 @@ function toggleSelect(id) {
   if (selected.has(id)) selected.delete(id);
   else {
     selected.add(id);
-    if (canShareFiles && isMedia(it) && it.ready && it.size <= PREFETCH_LIMIT) prepare(it).catch(() => {});
+    const selectedBytes = [...selected].map(current).filter(Boolean).reduce((n, x) => n + (x.size || 0), 0);
+    if (canShareFiles && isMedia(it) && it.ready && it.size <= PREFETCH_LIMIT && selectedBytes <= SHARE_LIMIT) prepare(it).catch(() => {});
   }
   const t = tiles.get(id);
   if (t) t.el.classList.toggle('selected', selected.has(id));
@@ -781,6 +802,7 @@ function downloadItems(ids) {
     url = withToken(`/api/zip?ids=${files.map((f) => f.id).join(',')}`);
     name = files.length === 1 ? `${files[0].name}.zip` : 'Shelf.zip';
   } else return toast('Nothing to download yet');
+  const sent = its.length === 1 && its[0].kind !== 'folder' ? [its[0]] : files;
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -788,7 +810,7 @@ function downloadItems(ids) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  for (const it of its) take(it.id);
+  for (const it of sent) take(it.id);
   if (selecting) exitSelect();
 }
 
@@ -820,6 +842,7 @@ function closeViewer(pop = true) {
   viewing = null;
   $('viewer').hidden = true;
   $('v-stage').replaceChildren();
+  delete $('v-stage').dataset.key;
   document.body.classList.remove('noscroll');
   if (pop && history.state && history.state.viewer) history.back();
 }
@@ -982,6 +1005,10 @@ async function pumpUploads() {
   uploading = true;
   $('uploads').hidden = false;
   while (queue.length) {
+    if (!token) {
+      queue.length = 0;
+      break;
+    }
     const f = queue.shift();
     uploadDone++;
     $('upload-title').textContent = uploadTotal > 1 ? `Sending ${uploadDone} of ${uploadTotal}` : 'Sending';
@@ -998,6 +1025,7 @@ async function pumpUploads() {
 function uploadOne(file) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
+    const at = token;
     const q = `name=${encodeURIComponent(file.name)}&size=${file.size}&mtime=${file.lastModified || ''}`;
     xhr.open('PUT', `/api/upload?${q}`);
     xhr.setRequestHeader('authorization', 'Bearer ' + token);
@@ -1005,8 +1033,10 @@ function uploadOne(file) {
       if (e.lengthComputable) $('upload-bar').style.width = `${Math.round((e.loaded / e.total) * 100)}%`;
     };
     xhr.onload = () => {
-      if (xhr.status === 401) onUnpaired();
-      else if (xhr.status !== 201) {
+      if (xhr.status === 401) {
+        queue.length = 0;
+        if (token === at) onUnpaired();
+      } else if (xhr.status !== 201) {
         let msg = '';
         try {
           msg = JSON.parse(xhr.responseText).error;

@@ -21,18 +21,23 @@ const SYNC_EVERY_TICKS = 5;
 const ADDRESS_CHECK_TICKS = 15;
 const MAX_DOWNLOADS = 3;
 const MAX_BODY = 64 * 1024 * 1024;
+const SMALL_BODY = 64 * 1024;
 const AUTH_WINDOW = 5 * 60 * 1000;
 const REPLAY_KEEP = 10000;
 const PEER_FAIL_MS = 60 * 1000;
 const BACKOFF_MAX = 5 * 60 * 1000;
 const PAIR_DECLINE_MS = 60 * 1000;
 const PAIR_DECLINE_LONG_MS = 15 * 60 * 1000;
+const PAIR_HANGUP_MS = 10 * 1000;
+const PAIR_DIALOG_GAP_MS = 5 * 1000;
+const UNAUTH_BEFORE_DEMOTE = 3;
+const BODY_IDLE_MS = 60 * 1000;
 
 // Shelf code -> the secret the computers on a shelf share, and a short
 // public id advertised over mDNS so computers on different shelves ignore
 // each other. The secret is stretched so the public id cannot be turned back
 // into the code, and it never travels: requests carry a signature made with
-// it instead (see signRequest).
+// it instead (see _signedHeaders).
 function codeKeys(code) {
   const norm = normalizeCode(code);
   const token = crypto.scryptSync(norm, 'shelf-token-v2', 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }).toString('hex');
@@ -122,6 +127,10 @@ function sign(token, parts) {
   return crypto.createHmac('sha256', token).update(parts.join('|')).digest('hex');
 }
 
+function endpoint(addr, port) {
+  return `${addr}:${port}`;
+}
+
 function sanitizePeer({ id, name, sid, addr, port }) {
   if (typeof id !== 'string' || !/^[a-f0-9]{8,64}$/.test(id)) return null;
   const p = Number(port);
@@ -142,8 +151,10 @@ function sanitizePeer({ id, name, sid, addr, port }) {
 // phones, over http and (when `web` is given) https with its own certificate.
 //
 // Every request between computers carries a signature made with the shelf
-// secret over the method, path, time and body, and every answer carries one
-// back, so a device that merely claims to be on the shelf learns nothing.
+// secret over the method, path, time, body and the address it was sent to,
+// and every answer carries one back over the same address, so a device
+// that merely claims to be on the shelf learns nothing and cannot stand in
+// the middle.
 class Net extends EventEmitter {
   constructor({ shelf, self, code, port = DEFAULT_PORT, mdns = true, onPairRequest, tickMs = TICK_MS, web = null, httpsPort = DEFAULT_HTTPS_PORT }) {
     super();
@@ -164,6 +175,7 @@ class Net extends EventEmitter {
     this.replay = new Map(); // request nonce -> expiry
     this.declines = new Map(); // addr -> { n, until } for /pair
     this.pairingFrom = new Set(); // addrs with a /pair dialog open
+    this.lastPairDialog = 0;
     this.webOpts = web; // { webDir?, version?, thumb?, lingerMs?, certDir }
     this.web = null;
     this.tls = null;
@@ -283,34 +295,62 @@ class Net extends EventEmitter {
 
   // ---- request signing ----
 
-  _signedHeaders(method, pathAndQuery, bodyBuf) {
+  // `to` is the address:port the request is sent to. It is part of every
+  // signature, and the receiver only accepts requests addressed to itself,
+  // so a signed request cannot be carried to a different computer.
+  _signedHeaders(method, pathAndQuery, bodyBuf, to) {
     const ts = String(Date.now());
     const rnd = crypto.randomBytes(8).toString('hex');
     return {
       'x-shelf-id': this.self.id,
       'x-shelf-ts': ts,
       'x-shelf-rnd': rnd,
-      'x-shelf-auth': sign(this.token, ['req', method, pathAndQuery, ts, rnd, sha256(bodyBuf || '')]),
+      'x-shelf-to': to,
+      'x-shelf-pre': sign(this.token, ['pre', method, pathAndQuery, ts, rnd, this.self.id, to]),
+      'x-shelf-auth': sign(this.token, ['req', method, pathAndQuery, ts, rnd, to, sha256(bodyBuf || '')]),
       rnd,
     };
   }
 
-  // Checks a request's signature; returns the sender's id or null.
-  _verifyRequest(req, bodyBuf) {
+  // Is this address:port one of mine, as a sender would have dialed it?
+  _isMine(to) {
+    const m = /^(.+):(\d+)$/.exec(String(to || ''));
+    if (!m || Number(m[2]) !== this.port) return false;
+    const addr = m[1].replace(/^\[|\]$/g, '');
+    return addr === '127.0.0.1' || addr === '::1' || addr === 'localhost' || ownAddresses().includes(addr);
+  }
+
+  // Checks the headers alone, before any body is read: a stranger costs no
+  // memory. Returns { ok, id, ts, rnd, to } or { ok: false, clock: true }
+  // when the signature is right but the sender's clock is off.
+  _verifyPre(req) {
     const h = req.headers;
     const id = h['x-shelf-id'];
     const ts = Number(h['x-shelf-ts']);
     const rnd = h['x-shelf-rnd'];
-    const auth = h['x-shelf-auth'];
-    if (typeof id !== 'string' || !/^[a-f0-9]{8,64}$/.test(id)) return null;
-    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > AUTH_WINDOW) return null;
-    if (typeof rnd !== 'string' || !/^[a-f0-9]{16}$/.test(rnd) || typeof auth !== 'string') return null;
-    const expected = sign(this.token, ['req', req.method, req.url, String(ts), rnd, sha256(bodyBuf || '')]);
+    const to = h['x-shelf-to'];
+    const pre = h['x-shelf-pre'];
+    if (typeof id !== 'string' || !/^[a-f0-9]{8,64}$/.test(id)) return { ok: false };
+    if (!Number.isFinite(ts) || typeof rnd !== 'string' || !/^[a-f0-9]{16}$/.test(rnd) || typeof pre !== 'string') return { ok: false };
+    if (typeof to !== 'string' || !this._isMine(to)) return { ok: false };
+    if (!safeEqual(pre, sign(this.token, ['pre', req.method, req.url, String(ts), rnd, id, to]))) return { ok: false };
+    if (Math.abs(Date.now() - ts) > AUTH_WINDOW) return { ok: false, clock: true };
+    return { ok: true, id, ts, rnd, to };
+  }
+
+  // Checks the full signature over the body; returns the sender's id or null.
+  _verifyRequest(req, bodyBuf) {
+    const pre = this._verifyPre(req);
+    if (!pre.ok) return null;
+    const auth = req.headers['x-shelf-auth'];
+    if (typeof auth !== 'string') return null;
+    const expected = sign(this.token, ['req', req.method, req.url, String(pre.ts), pre.rnd, pre.to, sha256(bodyBuf || '')]);
     if (!safeEqual(auth, expected)) return null;
-    if (this.replay.has(rnd)) return null;
-    this.replay.set(rnd, Date.now() + AUTH_WINDOW);
+    if (this.replay.has(pre.rnd)) return null;
+    // Kept for as long as the signed time could still be accepted.
+    this.replay.set(pre.rnd, Math.max(Date.now(), pre.ts) + AUTH_WINDOW);
     if (this.replay.size > REPLAY_KEEP) this._sweepReplay();
-    return id;
+    return pre.id;
   }
 
   _sweepReplay() {
@@ -318,8 +358,12 @@ class Net extends EventEmitter {
     for (const [k, until] of this.replay) if (until <= now) this.replay.delete(k);
   }
 
-  _proof(rnd, extra) {
-    return sign(this.token, ['resp', rnd, this.self.id, extra]);
+  _proof(req, extra) {
+    return sign(this.token, ['resp', req.headers['x-shelf-rnd'], this.self.id, req.headers['x-shelf-to'], extra]);
+  }
+
+  _expectedProof(rnd, p, extra) {
+    return sign(this.token, ['resp', rnd, p.id, endpoint(p.addr, p.port), extra]);
   }
 
   // ---- shelf membership ----
@@ -350,7 +394,7 @@ class Net extends EventEmitter {
   peerList() {
     const now = Date.now();
     return [...this.peers.values()]
-      .map((p) => ({ id: p.id, name: p.name, online: now - p.lastOk < ONLINE_WINDOW, addr: p.addr, port: p.port }))
+      .map((p) => ({ id: p.id, name: p.name, online: now - p.lastOk < ONLINE_WINDOW, addr: p.addr, port: p.port, clockSkew: p.clockSkew || 0 }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -366,7 +410,7 @@ class Net extends EventEmitter {
     const n = this.nearby.get(nearbyId);
     if (!n) throw new Error('That computer is no longer nearby');
     const body = { id: this.self.id, name: this.self.name, port: this.port };
-    const r = await request('POST', `http://${n.addr}:${n.port}/pair`, { body, timeout: 70 * 1000 });
+    const r = await request('POST', `http://${n.addr}:${n.port}/pair`, { body, timeout: 70 * 1000, limit: SMALL_BODY });
     if (r.status === 403) throw new Error(`${n.name} said no`);
     if (r.status === 429) throw new Error(`${n.name} is busy with another request. Try again in a minute.`);
     if (r.status !== 200 || !r.json || !r.json.code) throw new Error(`${n.name} didn't answer`);
@@ -378,13 +422,14 @@ class Net extends EventEmitter {
   // Adds a computer by IP address, for networks where mDNS doesn't get through.
   async addAddress(host, port = DEFAULT_PORT) {
     const rnd = crypto.randomBytes(8).toString('hex');
-    const r = await request('GET', `http://${host}:${port}/hello`, { timeout: 4000, headers: { 'x-shelf-challenge': rnd } });
+    const to = endpoint(host, port);
+    const r = await request('GET', `http://${host}:${port}/hello`, { timeout: 4000, limit: SMALL_BODY, headers: { 'x-shelf-challenge': rnd, 'x-shelf-to': to } });
     if (r.status !== 200 || !r.json || r.json.app !== 'shelf') throw new Error(`No Shelf app at ${host}:${port}`);
     const h = r.json;
     if (h.id === this.self.id) throw new Error("That's this computer");
-    const c = sanitizePeer({ id: h.id, name: h.name, sid: h.sid, addr: host, port: h.port || port });
+    const c = sanitizePeer({ id: h.id, name: h.name, sid: h.sid, addr: host, port });
     if (!c) throw new Error(`No Shelf app at ${host}:${port}`);
-    const proven = typeof h.proof === 'string' && safeEqual(h.proof, sign(this.token, ['hello', rnd, c.id]));
+    const proven = typeof h.proof === 'string' && safeEqual(h.proof, sign(this.token, ['hello', rnd, c.id, to]));
     if (proven) {
       this._seen({ ...c, sid: this.sid }, { verified: true });
       return 'peer';
@@ -420,18 +465,37 @@ class Net extends EventEmitter {
     p.syncing = true;
     try {
       const body = Buffer.from(JSON.stringify(this._payload()));
-      const { rnd, ...headers } = this._signedHeaders('POST', '/sync', body);
+      const to = endpoint(p.addr, p.port);
+      const { rnd, ...headers } = this._signedHeaders('POST', '/sync', body, to);
       const r = await request('POST', `http://${p.addr}:${p.port}/sync`, { raw: body, headers, timeout: 8000 });
       if (r.status === 401) {
-        // They moved to a different shelf.
-        this.peers.delete(p.id);
-        this.nearby.set(p.id, { ...p, sid: '?' });
-        this.emit('peers');
+        if (r.json && r.json.error === 'clock') {
+          // Same shelf, clocks apart: keep the peer and say so.
+          const skew = Number(r.json.serverTime) - Date.now();
+          if (p.clockSkew !== skew) {
+            p.clockSkew = skew;
+            this.emit('peers');
+          }
+          return;
+        }
+        // Several refusals in a row: they moved to a different shelf (a single
+        // one could be anything, including someone answering in their place).
+        p.unauth = (p.unauth || 0) + 1;
+        if (p.unauth >= UNAUTH_BEFORE_DEMOTE) {
+          this.peers.delete(p.id);
+          this.nearby.set(p.id, { ...p, sid: '?' });
+          this.emit('peers');
+        }
         return;
       }
       if (r.status !== 200 || !r.json) throw new Error('sync failed');
-      if (!safeEqual(r.headers['x-shelf-proof'], sign(this.token, ['resp', rnd, p.id, sha256(r.raw)]))) throw new Error('bad proof');
+      if (!safeEqual(r.headers['x-shelf-proof'], this._expectedProof(rnd, p, sha256(r.raw)))) throw new Error('bad proof');
       p.lastOk = Date.now();
+      p.unauth = 0;
+      if (p.clockSkew) {
+        p.clockSkew = 0;
+        this.emit('peers');
+      }
       const name = typeof r.json.from?.name === 'string' ? r.json.from.name.trim().slice(0, 60) : '';
       if (name && name !== p.name) {
         p.name = name;
@@ -480,28 +544,33 @@ class Net extends EventEmitter {
 
   // Records a computer we heard from (mDNS, an incoming sync, or a manual
   // add). A computer that claims our shelf becomes a peer only once it has
-  // proven it knows the secret: a signed request from it, or a correct answer
-  // to our challenge.
+  // proven it knows the secret, at the address in question: a signed request
+  // from there, or a correct answer to our challenge sent there. A known
+  // peer's address changes only the same way.
   _seen(raw, { verified = false } = {}) {
     const c = sanitizePeer(raw);
     if (!c || c.id === this.self.id) return null;
     const { id, name, sid, addr, port } = c;
     if (sid === this.sid) {
-      let p = this.peers.get(id);
+      const p = this.peers.get(id);
+      if (p && !verified) {
+        if (p.addr !== addr || p.port !== port) this._verifyPeer(c);
+        return p;
+      }
       if (!p && !verified) {
         this._verifyPeer(c);
         return null;
       }
       const isNew = !p;
-      if (!p) p = { id, lastOk: 0, have: new Set() };
-      Object.assign(p, { name: name || p.name || 'Computer', addr, port, sid });
-      this.peers.set(id, p);
+      const peer = p || { id, lastOk: 0, have: new Set() };
+      Object.assign(peer, { name: name || peer.name || 'Computer', addr, port, sid });
+      this.peers.set(id, peer);
       this.nearby.delete(id);
       if (isNew) {
         this.emit('peers');
-        this._syncPeer(p);
+        this._syncPeer(peer);
       }
-      return p;
+      return peer;
     }
     const known = this.nearby.get(id);
     this.nearby.set(id, { id, name, sid, addr, port });
@@ -514,10 +583,11 @@ class Net extends EventEmitter {
     this.verifying.add(c.id);
     try {
       const rnd = crypto.randomBytes(8).toString('hex');
-      const r = await request('GET', `http://${c.addr}:${c.port}/hello`, { timeout: 4000, headers: { 'x-shelf-challenge': rnd } });
-      const ok = r.status === 200 && r.json && r.json.id === c.id && typeof r.json.proof === 'string' && safeEqual(r.json.proof, sign(this.token, ['hello', rnd, c.id]));
-      if (ok) this._seen({ ...c, name: r.json.name, port: r.json.port || c.port, sid: this.sid }, { verified: true });
-      else {
+      const to = endpoint(c.addr, c.port);
+      const r = await request('GET', `http://${c.addr}:${c.port}/hello`, { timeout: 4000, limit: SMALL_BODY, headers: { 'x-shelf-challenge': rnd, 'x-shelf-to': to } });
+      const ok = r.status === 200 && r.json && r.json.id === c.id && typeof r.json.proof === 'string' && safeEqual(r.json.proof, sign(this.token, ['hello', rnd, c.id, to]));
+      if (ok) this._seen({ ...c, name: r.json.name, sid: this.sid }, { verified: true });
+      else if (!this.peers.has(c.id)) {
         // Says it is on our shelf, cannot prove it: a stranger.
         this.nearby.set(c.id, { ...c, sid: '?' });
         this.emit('peers');
@@ -569,7 +639,7 @@ class Net extends EventEmitter {
     const dest = this.shelf.storePath(it);
     const dir = path.dirname(dest);
     const tmp = path.join(dir, '.partial-' + path.basename(dest));
-    const base = `http://${peer.addr}:${peer.port}/blob/${it.id}`;
+    const to = endpoint(peer.addr, peer.port);
     let got = 0;
     let lastReport = 0;
     const progress = (n) => {
@@ -582,8 +652,8 @@ class Net extends EventEmitter {
     };
     const fetchPart = (query, out) => {
       const pathAndQuery = `/blob/${it.id}${query}`;
-      const { rnd, ...headers } = this._signedHeaders('GET', pathAndQuery, null);
-      const proof = sign(this.token, ['resp', rnd, peer.id, 'blob']);
+      const { rnd, ...headers } = this._signedHeaders('GET', pathAndQuery, null, to);
+      const proof = this._expectedProof(rnd, peer, 'blob');
       return fetchToFile(`http://${peer.addr}:${peer.port}${pathAndQuery}`, headers, out, progress, ac.signal, proof);
     };
     this.shelf.setLocal(it.id, { state: 'downloading', got: 0, path: dest });
@@ -618,8 +688,10 @@ class Net extends EventEmitter {
       this.shelf.setLocal(it.id, { state: 'ready', got, path: dest });
     } catch (err) {
       this.active.delete(it.id);
+      const cur = this.shelf.items.get(it.id);
       if (ac.signal.aborted) {
-        await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+        if (!cur || cur.removed) await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+        else if (this.shelf.local.has(it.id)) this.shelf.setLocal(it.id, { state: 'missing', got: 0 });
         return;
       }
       if (it.kind !== 'folder') await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
@@ -642,19 +714,33 @@ class Net extends EventEmitter {
     if (req.method === 'GET' && url.pathname === '/hello') {
       const out = { app: 'shelf', v: 2, id: this.self.id, name: this.self.name, sid: this.sid, port: this.port };
       const ch = req.headers['x-shelf-challenge'];
-      if (typeof ch === 'string' && /^[a-f0-9]{16}$/.test(ch)) out.proof = sign(this.token, ['hello', ch, this.self.id]);
+      const to = req.headers['x-shelf-to'];
+      // The proof names the address the challenger dialed and is only given
+      // when that address is this computer's own.
+      if (typeof ch === 'string' && /^[a-f0-9]{16}$/.test(ch) && typeof to === 'string' && this._isMine(to)) {
+        out.proof = sign(this.token, ['hello', ch, this.self.id, to]);
+      }
       return send(res, 200, out);
     }
 
     if (req.method === 'POST' && url.pathname === '/pair') return this._pairRoute(req, res, from);
 
     if (url.pathname === '/sync' && req.method === 'POST') {
+      // Headers first: nobody without the secret gets to fill memory.
+      const pre = this._verifyPre(req);
+      if (!pre.ok) {
+        req.resume();
+        return send(res, 401, pre.clock ? { error: 'clock', serverTime: Date.now() } : { error: 'not on this shelf' });
+      }
+      req.socket.setTimeout(BODY_IDLE_MS, () => req.destroy(new Error('sync stalled')));
       let raw;
       try {
         raw = await readBody(req, MAX_BODY);
       } catch (err) {
         if (err.code === 'TOO_LARGE') return send(res, 413, { error: 'too large' });
         throw err;
+      } finally {
+        req.socket.setTimeout(0);
       }
       const senderId = this._verifyRequest(req, raw);
       if (!senderId) return send(res, 401, { error: 'not on this shelf' });
@@ -672,7 +758,7 @@ class Net extends EventEmitter {
       res.writeHead(200, {
         'content-type': 'application/json',
         'content-length': out.length,
-        'x-shelf-proof': this._proof(req.headers['x-shelf-rnd'], sha256(out)),
+        'x-shelf-proof': this._proof(req, sha256(out)),
       });
       return res.end(out);
     }
@@ -704,7 +790,7 @@ class Net extends EventEmitter {
       res.writeHead(200, {
         'content-type': 'application/octet-stream',
         'content-length': st.size,
-        'x-shelf-proof': this._proof(req.headers['x-shelf-rnd'], 'blob'),
+        'x-shelf-proof': this._proof(req, 'blob'),
       });
       const stream = fs.createReadStream(file);
       stream.on('error', () => res.destroy());
@@ -717,8 +803,8 @@ class Net extends EventEmitter {
   }
 
   // Another computer asking to join. One open question per address, a
-  // cooldown after a refusal, and the question goes away if the asker hangs
-  // up before it is answered.
+  // cooldown after a refusal or a hang-up, a gap between questions, and the
+  // question goes away if the asker hangs up before it is answered.
   async _pairRoute(req, res, from) {
     const body = parseJson(await readBody(req, 4096));
     if (!body || typeof body.id !== 'string' || typeof body.name !== 'string' || !body.id || !body.name.trim()) {
@@ -727,8 +813,9 @@ class Net extends EventEmitter {
     const now = Date.now();
     const d = this.declines.get(from);
     if (d && d.until > now) return send(res, 429, { error: 'declined recently' });
-    if (this.pairingFrom.has(from)) return send(res, 429, { error: 'busy' });
+    if (this.pairingFrom.has(from) || now - this.lastPairDialog < PAIR_DIALOG_GAP_MS) return send(res, 429, { error: 'busy' });
     this.pairingFrom.add(from);
+    this.lastPairDialog = now;
     const ac = new AbortController();
     let done = false;
     res.on('close', () => {
@@ -737,7 +824,11 @@ class Net extends EventEmitter {
     try {
       const ok = await this.onPairRequest({ id: body.id.slice(0, 64), name: body.name.trim().slice(0, 60), addr: from, signal: ac.signal });
       done = true;
-      if (ac.signal.aborted) return;
+      if (ac.signal.aborted) {
+        const n = (d ? d.n : 0) + 1;
+        this.declines.set(from, { n, until: Date.now() + Math.min(PAIR_HANGUP_MS * 2 ** (n - 1), PAIR_DECLINE_LONG_MS) });
+        return;
+      }
       if (!ok) {
         const n = (d ? d.n : 0) + 1;
         this.declines.set(from, { n, until: Date.now() + (n >= 3 ? PAIR_DECLINE_LONG_MS : PAIR_DECLINE_MS) });
@@ -819,7 +910,8 @@ function listen(server, port) {
   });
 }
 
-function request(method, url, { body, raw, headers = {}, timeout = 5000 } = {}) {
+// A request with a bounded answer and a hard deadline.
+function request(method, url, { body, raw, headers = {}, timeout = 5000, limit = MAX_BODY } = {}) {
   return new Promise((resolve, reject) => {
     const data = raw || (body === undefined ? null : Buffer.from(JSON.stringify(body)));
     const req = http.request(url, {
@@ -827,14 +919,19 @@ function request(method, url, { body, raw, headers = {}, timeout = 5000 } = {}) 
       headers: { ...headers, ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}) },
       timeout,
     });
+    const deadline = setTimeout(() => req.destroy(new Error('deadline')), Math.max(timeout * 3, 15000));
+    const done = (fn) => (v) => {
+      clearTimeout(deadline);
+      fn(v);
+    };
     req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
+    req.on('error', done(reject));
     req.on('response', (res) => {
       const chunks = [];
       let size = 0;
       res.on('data', (c) => {
         size += c.length;
-        if (size > MAX_BODY) {
+        if (size > limit) {
           req.destroy(new Error('response too large'));
           return;
         }
@@ -842,9 +939,9 @@ function request(method, url, { body, raw, headers = {}, timeout = 5000 } = {}) 
       });
       res.on('end', () => {
         const buf = Buffer.concat(chunks);
-        resolve({ status: res.statusCode, headers: res.headers, raw: buf, json: parseJson(buf) });
+        done(resolve)({ status: res.statusCode, headers: res.headers, raw: buf, json: parseJson(buf) });
       });
-      res.on('error', reject);
+      res.on('error', done(reject));
     });
     if (data) req.write(data);
     req.end();

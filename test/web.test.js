@@ -155,17 +155,50 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
     assert.strictEqual(b.shelf.visible().length, 0, 'device records are not shelf items');
   });
 
-  await t.test('the six-digit code works too and locks after repeated wrong tries', async () => {
+  await t.test('the six-digit code works too; guessing locks the digits but never the QR code', async () => {
     const pair = a.net.web.newPair();
     const r = await call(a.base, '/api/pair', { method: 'POST', body: { pin: pair.pin } });
     assert.strictEqual(r.status, 200);
     a.shelf.removeDevice(r.json.device.id);
-    a.net.web.newPair();
+    const again = a.net.web.newPair();
+    // Junk without any code does not count as a guess.
+    for (let i = 0; i < 5; i++) assert.strictEqual((await call(a.base, '/api/pair', { method: 'POST', body: {} })).status, 403);
+    assert.ok(!a.net.web.pair.pinLocked);
     let last = 0;
+    for (let i = 0; i < 12; i++) {
+      last = (await call(a.base, '/api/pair', { method: 'POST', body: { pin: String(100000 + i) } })).status;
+      a.net.web.fails.clear(); // keep the per-address lock out of this part
+    }
+    assert.strictEqual(last, 403);
+    assert.ok(a.net.web.pair.pinLocked, 'the digits are locked');
+    assert.ok(a.net.web.pairInfo(), 'the code on the QR is still live');
+    assert.strictEqual((await call(a.base, '/api/pair', { method: 'POST', body: { pin: again.pin } })).status, 403, 'even the right digits are refused now');
+    const viaQr = await call(a.base, '/api/pair', { method: 'POST', body: { code: again.code } });
+    assert.strictEqual(viaQr.status, 200, 'the QR code still pairs');
+    a.shelf.removeDevice(viaQr.json.device.id);
+    a.net.web.newPair();
     for (let i = 0; i < 12; i++) last = (await call(a.base, '/api/pair', { method: 'POST', body: { pin: '123456' } })).status;
-    assert.strictEqual(last, 429, 'locked out');
-    assert.strictEqual(a.net.web.pairInfo(), null, 'the code was thrown away after too many wrong tries');
+    assert.strictEqual(last, 429, 'an address that keeps guessing is locked out');
     a.net.web.fails.clear();
+  });
+
+  await t.test('a removed phone loses its live stream at once', async () => {
+    const pair = a.net.web.newPair();
+    const r = await call(a.base, '/api/pair', { method: 'POST', body: { code: pair.code } });
+    assert.strictEqual(r.status, 200);
+    const ended = new Promise((resolve) => {
+      const req = http.get(`${a.base}/api/events?t=${r.json.token}`, (res) => {
+        res.on('data', () => {});
+        res.on('end', () => resolve('ended'));
+        res.on('close', () => resolve('closed'));
+      });
+      req.on('error', () => resolve('error'));
+    });
+    await until(() => a.net.web.clients.size === 1, 'stream open');
+    a.shelf.removeDevice(r.json.device.id);
+    const how = await Promise.race([ended, new Promise((res) => setTimeout(() => res('still open'), 2000))]);
+    assert.notStrictEqual(how, 'still open', 'the stream was cut');
+    assert.strictEqual(a.net.web.clients.size, 0);
   });
 
   let photo;
