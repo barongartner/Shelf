@@ -25,13 +25,15 @@ Get the latest version from [Releases](https://github.com/barongartner/Shelf/rel
 check **Private networks**.
 
 **macOS:** the files on Releases are built by GitHub and are not notarized, so macOS
-blocks them on first open. The quickest install skips that entirely. In Terminal:
+blocks them on first open. The quickest install skips that entirely. The repo is private,
+so the download goes through the GitHub CLI (`brew install gh`, then `gh auth login`
+once). In Terminal:
 
 ```bash
-curl -fsSL https://github.com/barongartner/Shelf/releases/latest/download/Shelf-1.0.0-mac-arm64.zip -o /tmp/Shelf.zip && ditto -x -k /tmp/Shelf.zip /Applications
+gh release download --repo barongartner/Shelf --pattern 'Shelf-*-mac-arm64.zip' --output /tmp/Shelf.zip --clobber && rm -rf /Applications/Shelf.app && ditto -x -k /tmp/Shelf.zip /Applications
 ```
 
-(Use the `mac-x64` file on an Intel Mac.) Then open Shelf from Applications. If you
+(Use `mac-x64` in the pattern on an Intel Mac.) Then open Shelf from Applications. If you
 downloaded the .zip or .dmg in Safari instead, open the app once, then go to System
 Settings, Privacy & Security, scroll to Security and click **Open Anyway**. On macOS 14
 and earlier, right-click the app and choose Open. Allow it when macOS asks to find devices
