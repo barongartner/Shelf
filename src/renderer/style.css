@@ -687,7 +687,7 @@ select:focus {
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   color: var(--muted);
 }
 .code.pin {

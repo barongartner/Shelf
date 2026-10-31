@@ -401,7 +401,7 @@ function renderPhone() {
   }
   $('phone-base').textContent = p.base || '';
   $('phone-stable').hidden = !p.stable;
-  $('phone-stable').textContent = p.stable ? `or ${p.stable} (stays the same if the address changes)` : '';
+  $('phone-stable').textContent = p.stable ? `or ${p.stable.replace(/^https?:\/\//, '').replace(/\/$/, '')}, which stays the same when the address changes` : '';
   $('phone-pin').textContent = p.pin ? `${p.pin.slice(0, 3)} ${p.pin.slice(3)}` : '';
   renderPairExpiry();
 
