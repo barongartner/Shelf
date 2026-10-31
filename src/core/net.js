@@ -659,7 +659,7 @@ class Net extends EventEmitter {
     this.shelf.setLocal(it.id, { state: 'downloading', got: 0, path: dest });
     try {
       await fs.promises.mkdir(dir, { recursive: true });
-      await fs.promises.rm(dest, { recursive: true, force: true });
+      await fs.promises.rm(dest, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       if (it.kind === 'folder') {
         await fs.promises.mkdir(tmp, { recursive: true });
         for (const d of it.dirs || []) await fs.promises.mkdir(files.safeJoin(tmp, files.safeRel(d)), { recursive: true });
@@ -682,7 +682,7 @@ class Net extends EventEmitter {
       for (const k of [...this.peerFail.keys()]) if (k.startsWith(it.id + ':')) this.peerFail.delete(k);
       this.active.delete(it.id);
       if (!this.shelf.items.get(it.id) || this.shelf.items.get(it.id).removed) {
-        await fs.promises.rm(dir, { recursive: true, force: true });
+        await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
         return;
       }
       this.shelf.setLocal(it.id, { state: 'ready', got, path: dest });
@@ -690,11 +690,11 @@ class Net extends EventEmitter {
       this.active.delete(it.id);
       const cur = this.shelf.items.get(it.id);
       if (ac.signal.aborted) {
-        if (!cur || cur.removed) await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+        if (!cur || cur.removed) await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
         else if (this.shelf.local.has(it.id)) this.shelf.setLocal(it.id, { state: 'missing', got: 0 });
         return;
       }
-      if (it.kind !== 'folder') await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      if (it.kind !== 'folder') await fs.promises.rm(tmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
       const n = (this.failures.get(it.id) || 0) + 1;
       this.failures.set(it.id, n);
       this.backoff.set(it.id, Date.now() + Math.min(4000 * 2 ** (n - 1), BACKOFF_MAX));

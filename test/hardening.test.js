@@ -212,10 +212,12 @@ test('a cancelled download is retried instead of sitting at a frozen bar', async
   fs.writeFileSync(file, crypto.randomBytes(6 * 1024 * 1024));
   const it = await a.shelf.addPath(file);
   assert.strictEqual(await b.net.addAddress('127.0.0.1', a.net.port), 'peer');
-  await until(() => b.net.active.has(it.id), 'download starts');
-  b.net.active.get(it.id).abort();
-  // Over loopback the file may already be through; either way nothing may be
-  // left showing a download that is not running.
+  // Over loopback the whole file can be through between two polls, so "it
+  // started" and "it is already done" both count; the cancel only happens
+  // when there is something in flight to cancel.
+  await until(() => b.net.active.has(it.id) || b.shelf.local.get(it.id)?.state === 'ready', 'download starts');
+  if (b.net.active.has(it.id)) b.net.active.get(it.id).abort();
+  // Either way nothing may be left showing a download that is not running.
   await new Promise((r) => setTimeout(r, 300));
   const l = b.shelf.local.get(it.id);
   assert.ok(l.state !== 'downloading' || b.net.active.has(it.id), 'no frozen progress bar');

@@ -89,7 +89,7 @@ class Shelf extends EventEmitter {
     for (const name of await fs.promises.readdir(this.dataDir).catch(() => [])) {
       if (/^shelf\.json\..*\.tmp$/.test(name)) await fs.promises.rm(path.join(this.dataDir, name), { force: true }).catch(() => {});
     }
-    await fs.promises.rm(this.outboxDir, { recursive: true, force: true });
+    await fs.promises.rm(this.outboxDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     await fs.promises.mkdir(this.outboxDir, { recursive: true });
   }
 
@@ -186,7 +186,7 @@ class Shelf extends EventEmitter {
       await fs.promises.rename(tmp, dst);
     } catch (err) {
       this.local.delete(it.id);
-      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
       const cur = this.items.get(it.id);
       if (cur && !cur.removed) this._tombstone(cur);
       throw err;
@@ -194,7 +194,7 @@ class Shelf extends EventEmitter {
     const cur = this.items.get(it.id);
     if (!cur || cur.removed) {
       this.local.delete(it.id);
-      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
       throw new Error('removed while uploading');
     }
     if (cur.size !== got) this._update(cur, { size: got });
@@ -404,7 +404,7 @@ class Shelf extends EventEmitter {
     this.emit('dropped', id);
     const dir = path.join(this.storeDir, id);
     if (l && l.path && !files.isInside(l.path, this.storeDir)) return;
-    fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+    fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
   }
 
   async _cleanStore() {
@@ -416,7 +416,7 @@ class Shelf extends EventEmitter {
       const it = this.items.get(name);
       const l = this.local.get(name);
       const keep = it && !it.removed && l && (l.state === 'ready' || l.state === 'missing') && files.isInside(l.path, this.storeDir);
-      if (!keep) await fs.promises.rm(path.join(this.storeDir, name), { recursive: true, force: true });
+      if (!keep) await fs.promises.rm(path.join(this.storeDir, name), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }
   }
 
