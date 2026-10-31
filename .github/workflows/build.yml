@@ -56,7 +56,9 @@ jobs:
 
   macos:
     needs: test
-    runs-on: macos-14
+    runs-on: macos-15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -64,15 +66,31 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # Runners have no signing certificate, so this is a build check only.
-      # Release .dmg/.zip files are built and signed locally with
-      # scripts/release-mac.sh, the same as Verbatim, Split and Photon.
-      - name: Build (unsigned)
+      # Runners have no signing certificate. The app is ad-hoc signed so it
+      # opens after "Open Anyway" (or with no prompt when installed with
+      # ditto, see the README). scripts/release-mac.sh on a Mac replaces
+      # these with properly signed files.
+      - name: Build (ad-hoc signed)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --mac --x64 --arm64 --publish never
+        run: npx electron-builder --mac --x64 --arm64 --publish never -c.mac.identity=-
+      - name: Check the signature
+        run: |
+          for app in dist/mac/Shelf.app dist/mac-arm64/Shelf.app; do
+            codesign --verify --deep --strict "$app"
+            codesign -dv "$app" 2>&1 | grep -E '^Identifier=com.barongartner.shelf' || { echo "::error::$app is not sealed as com.barongartner.shelf"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: Shelf-macos-unsigned
-          path: dist/Shelf-*-mac-*.zip
-          retention-days: 7
+          name: Shelf-macos
+          path: |
+            dist/Shelf-*-mac-*.zip
+            dist/Shelf-*-mac-*.dmg
+          retention-days: 30
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Shelf-*-mac-*.zip
+            dist/Shelf-*-mac-*.dmg
