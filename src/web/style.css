@@ -280,6 +280,50 @@ a {
   min-height: 60vh;
 }
 
+.home-card {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 10px 12px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 0.5px var(--line);
+  animation: tile-in 0.35s ease-out;
+}
+
+.home-card-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  background: linear-gradient(#5b82ff, #2f4fd6);
+  display: grid;
+  place-items: center;
+}
+
+.home-card-icon svg {
+  width: 24px;
+  height: 24px;
+  fill: #fff;
+}
+
+.home-card-title {
+  font-weight: 600;
+}
+
+.home-card-sub {
+  color: var(--muted);
+  font-size: 14px;
+  margin-top: 2px;
+}
+
+.home-card-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+}
+
 .uploads {
   margin-bottom: 10px;
 }

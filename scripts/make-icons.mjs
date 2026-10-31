@@ -59,7 +59,11 @@ render(trayTemplate, 32, 'assets/trayTemplate@2x.png');
 render(dragImage, 48, 'assets/drag.png');
 // Home-screen and favicon images for the phone page, drawn edge to edge
 // (iOS rounds the corners itself).
-const webIcon = fs.readFileSync('src/web/icon.svg', 'utf8');
-render(webIcon, 180, 'src/web/icon-180.png');
+// Home-screen icons are full-bleed squares with no transparency: iOS rounds
+// the corners itself and would paint transparent pixels black, and Android
+// masks the manifest icon.
+const webIcon = fs.readFileSync('src/web/icon-square.svg', 'utf8');
+render(webIcon, 180, 'src/web/apple-touch-icon.png');
+render(webIcon, 192, 'src/web/icon-192.png');
 render(webIcon, 512, 'src/web/icon-512.png');
 console.log('icons written');

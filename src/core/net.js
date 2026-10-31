@@ -206,6 +206,7 @@ class Net extends EventEmitter {
         lingerMs: this.webOpts.lingerMs,
         caDer: () => (this.tls ? this.tls.caDer : null),
         ports: () => ({ http: this.port, https: this.httpsPort }),
+        hosts: () => this.addresses.hosts.filter((h) => h.endsWith('.local')),
       });
       this.web.onPaired = (d) => this.emit('paired', d);
       this.on('peers', () => this.web.broadcast());
@@ -808,7 +809,10 @@ function listen(server, port) {
       } else reject(err);
     };
     server.once('error', onError);
-    server.listen(port, '0.0.0.0', () => {
+    // No host: both IPv6 and IPv4 where IPv6 exists, IPv4 alone otherwise. A
+    // phone that resolves the computer's .local name to an IPv6 address can
+    // still get in.
+    server.listen(port, () => {
       server.removeListener('error', onError);
       resolve(server.address().port);
     });

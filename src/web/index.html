@@ -7,12 +7,15 @@
     <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-title" content="Shelf" />
+    <meta name="application-name" content="Shelf" />
     <meta name="format-detection" content="telephone=no" />
     <title>Shelf</title>
+    <!-- The home-screen icon is a real, opaque PNG at a plain URL: iOS ignores
+         SVG and data: icons and paints transparent pixels black. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/icon-180.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=__SHELF_V__" />
   </head>
   <body>
     <div id="app" hidden>
@@ -37,6 +40,19 @@
       <div id="banner" class="banner" hidden></div>
 
       <main id="main">
+        <section id="home-card" class="home-card" hidden>
+          <div class="home-card-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16"><path d="M2.5 2.5h4l1.5 1.5v5.5H2.5z"/><rect x="9" y="5" width="4.5" height="4.5" rx="1"/><rect x="1" y="10.25" width="14" height="1.75" rx="0.6"/><rect x="2.5" y="12" width="1.5" height="2.5" rx="0.5"/><rect x="12" y="12" width="1.5" height="2.5" rx="0.5"/></svg>
+          </div>
+          <div class="home-card-text">
+            <div class="home-card-title">Keep Shelf one tap away</div>
+            <div class="home-card-sub">Add it to your Home Screen. It remembers this phone and reconnects by itself.</div>
+          </div>
+          <div class="home-card-actions">
+            <button id="home-show" class="pill primary">Show me</button>
+            <button id="home-later" class="pill">Later</button>
+          </div>
+        </section>
         <section id="uploads" class="uploads" hidden>
           <div class="upload-card">
             <div class="upload-text"><span id="upload-title">Sending</span><span id="upload-name" class="upload-name"></span></div>
@@ -131,6 +147,11 @@
         </label>
         <p class="hint">Connected to <strong id="set-computer"></strong>. Everything on this shelf is shared with every computer on it.</p>
 
+        <h2 id="home-section">Home Screen</h2>
+        <p class="hint" id="home-text"></p>
+        <ol class="steps" id="home-steps"></ol>
+        <button id="btn-stable" class="pill primary" hidden>Use the stable address</button>
+
         <h2>Save to Photos</h2>
         <p class="hint" id="secure-text"></p>
         <ol class="steps" id="cert-steps">
@@ -168,6 +189,6 @@
     </div>
 
     <div id="toast" class="toast" hidden></div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=__SHELF_V__"></script>
   </body>
 </html>

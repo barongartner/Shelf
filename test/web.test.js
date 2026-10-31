@@ -120,7 +120,7 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
     assert.match(r.headers.get('content-type'), /text\/html/);
     assert.match(r.headers.get('content-security-policy'), /default-src 'self'/);
     assert.ok(r.buf.toString().includes('<title>Shelf</title>'));
-    for (const p of ['/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg', '/icon-180.png']) {
+    for (const p of ['/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg', '/apple-touch-icon.png']) {
       assert.strictEqual((await call(a.base, p, { raw: true })).status, 200, p);
     }
   });
@@ -306,12 +306,70 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
     assert.strictEqual((await call(a.base, '/api/me', { token })).json.paired, false);
   });
 
+  await t.test('the home-screen icon is a plain, public, opaque PNG at the root', async () => {
+    for (const p of ['/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/apple-touch-icon-180x180.png', '/icon-192.png', '/icon-512.png']) {
+      const r = await call(a.base, p, { raw: true });
+      assert.strictEqual(r.status, 200, p);
+      assert.strictEqual(r.headers.get('content-type'), 'image/png', p);
+      assert.strictEqual(r.buf.readUInt32BE(0), 0x89504e47, `${p} is a PNG`);
+    }
+    const page = (await call(a.base, '/', { raw: true })).buf.toString();
+    assert.match(page, /<link rel="apple-touch-icon" sizes="180x180" href="\/apple-touch-icon\.png"/);
+    assert.ok(!/apple-mobile-web-app-capable/.test(page), 'a bookmark, not a standalone app: standalone has its own storage and no certificate prompt');
+  });
+
+  await t.test('the session lives in a cookie too, survives emptied storage, and ends with forget', async () => {
+    const pair = a.net.web.newPair();
+    const r = await call(a.base, '/api/pair', { method: 'POST', body: { pin: pair.pin } });
+    assert.strictEqual(r.status, 200);
+    const cookie = r.headers.get('set-cookie');
+    assert.match(cookie, new RegExp(`^shelf=${r.json.token}; Max-Age=\\d+; Path=/; SameSite=Lax; HttpOnly`));
+    // The browser lost localStorage: only the cookie comes back.
+    const me = await call(a.base, '/api/me', { headers: { cookie: `shelf=${r.json.token}` } });
+    assert.strictEqual(me.json.paired, true);
+    assert.strictEqual(me.json.token, r.json.token, 'the page can refill its storage from the cookie');
+    assert.ok(Array.isArray(me.json.hosts), 'stable names for the bookmark');
+    assert.strictEqual(me.headers.get('set-cookie'), null, 'no cookie churn when the cookie was used');
+    assert.strictEqual((await call(a.base, '/api/state', { headers: { cookie: `shelf=${r.json.token}` } })).status, 200);
+    // Arriving on another of the computer's addresses with the token in the URL gets a cookie there.
+    const handed = await call(a.base, `/api/me?t=${r.json.token}`);
+    assert.match(handed.headers.get('set-cookie') || '', /^shelf=/);
+    // Forget ends it everywhere.
+    const bye = await call(a.base, '/api/forget', { method: 'POST', headers: { cookie: `shelf=${r.json.token}` } });
+    assert.strictEqual(bye.status, 200);
+    assert.match(bye.headers.get('set-cookie'), /^shelf=; Max-Age=0/);
+    assert.strictEqual((await call(a.base, '/api/state', { headers: { cookie: `shelf=${r.json.token}` } })).status, 401);
+    assert.strictEqual((await call(a.base, '/api/state', { token: r.json.token })).status, 401);
+    await until(() => !b.shelf.devices().some((d) => d.id === r.json.device.id), 'revocation reaches the other computer');
+  });
+
   await t.test('peer routes still work next to the browser routes', async () => {
     assert.strictEqual((await call(a.base, '/hello')).json.app, 'shelf');
     assert.strictEqual((await call(a.base, '/sync', { method: 'POST', body: {} })).status, 401);
     assert.strictEqual((await call(a.base, `/blob/${photo.id}`, { raw: true })).status, 401);
     assert.strictEqual((await call(a.base, '/nope')).status, 404);
   });
+});
+
+test('the phone page scripts and the desktop renderer script parse', () => {
+  for (const f of ['src/web/app.js', 'src/web/sw.js', 'src/renderer/app.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    assert.doesNotThrow(() => new Function(src), `${f} has a syntax error`);
+  }
+});
+
+test('the service worker is served for the secure address with the right headers', async (t) => {
+  const a = await makeNode('PC', newCode());
+  t.after(() => a.net.stop());
+  const r = await call(a.base, '/sw.js?v=1.1.0', { raw: true });
+  assert.strictEqual(r.status, 200);
+  assert.match(r.headers.get('content-type'), /javascript/);
+  assert.strictEqual(r.headers.get('service-worker-allowed'), '/');
+  assert.strictEqual(r.headers.get('cache-control'), 'no-cache');
+  assert.ok(r.buf.toString().includes("addEventListener('fetch'"));
+  const page = (await call(a.base, '/', { raw: true })).buf.toString();
+  assert.match(page, /app\.js\?v=test/, 'assets carry the version so updates reach the phone');
+  assert.match(page, /style\.css\?v=test/);
 });
 
 test('https is served with the computer-made certificate', async (t) => {

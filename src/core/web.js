@@ -21,28 +21,61 @@ const TEXT_LIMIT = 256 * 1024;
 const MAX_THUMBS = 400;
 const MANIFEST_LIMIT = 2000;
 
+// Safari asks for the home-screen icon at these root paths on its own, with
+// no cookies and no token, so they are public like the page itself.
 const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/index.html': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
   '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json'],
+  '/sw.js': ['sw.js', 'text/javascript; charset=utf-8'],
   '/icon.svg': ['icon.svg', 'image/svg+xml'],
-  '/icon-180.png': ['icon-180.png', 'image/png'],
+  '/apple-touch-icon.png': ['apple-touch-icon.png', 'image/png'],
+  '/apple-touch-icon-precomposed.png': ['apple-touch-icon.png', 'image/png'],
+  '/apple-touch-icon-180x180.png': ['apple-touch-icon.png', 'image/png'],
+  '/icon-192.png': ['icon-192.png', 'image/png'],
   '/icon-512.png': ['icon-512.png', 'image/png'],
 };
 
-const CSP = [
-  "default-src 'self'",
-  "img-src 'self' blob: data:",
-  "media-src 'self' blob:",
-  "connect-src 'self'",
-  "style-src 'self'",
-  "script-src 'self'",
-  "frame-ancestors 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-].join('; ');
+const COOKIE = 'shelf';
+const COOKIE_MAX_AGE = 400 * 24 * 60 * 60; // the longest browsers keep a cookie
+
+function cookieValue(req, name) {
+  const raw = req.headers.cookie;
+  if (typeof raw !== 'string') return null;
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    if (part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
+}
+
+function setCookie(token) {
+  return `${COOKIE}=${token}; Max-Age=${COOKIE_MAX_AGE}; Path=/; SameSite=Lax; HttpOnly`;
+}
+
+function clearCookie() {
+  return `${COOKIE}=; Max-Age=0; Path=/; SameSite=Lax; HttpOnly`;
+}
+
+// The page may only talk to the computer that served it. Its other
+// addresses (the stable name, the secure port) are allowed so the page can
+// check they answer before switching to them.
+function csp(origins) {
+  return [
+    "default-src 'self'",
+    "img-src 'self' blob: data:",
+    "media-src 'self' blob:",
+    `connect-src 'self' ${origins.join(' ')}`.trim(),
+    "style-src 'self'",
+    "script-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join('; ');
+}
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -80,7 +113,7 @@ class Web {
   // shelf: the Shelf; self: { id, name } of this computer
   // thumb(item, localPath) -> { buf, type } | null (optional, Electron only)
   // lingerMs() -> ms | null; caDer() -> Buffer | null
-  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}) }) {
+  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [] }) {
     this.shelf = shelf;
     this.self = self;
     this.webDir = webDir || path.join(__dirname, '..', 'web');
@@ -89,6 +122,7 @@ class Web {
     this.lingerMs = lingerMs;
     this.caDer = caDer;
     this.ports = ports;
+    this.hosts = hosts;
     this.pair = null;
     this.fails = new Map(); // ip -> { n, until }
     this.clients = new Set(); // SSE responses
@@ -158,14 +192,32 @@ class Web {
 
   // ---- auth ----
 
+  // The token can come in a header, in the query string (images, downloads
+  // and the event stream cannot set headers) or in the cookie the server
+  // set when the phone paired. The cookie is what survives Safari throwing
+  // away a site's script storage after a week of not being opened.
   deviceFor(req, url) {
     const h = req.headers.authorization;
     let token = null;
-    if (h && /^Bearer\s+/i.test(h)) token = h.replace(/^Bearer\s+/i, '').trim();
-    if (!token) token = url.searchParams.get('t');
+    let via = null;
+    if (h && /^Bearer\s+/i.test(h)) {
+      token = h.replace(/^Bearer\s+/i, '').trim();
+      via = 'header';
+    }
+    if (!token) {
+      token = url.searchParams.get('t');
+      via = 'query';
+    }
+    if (!token) {
+      token = cookieValue(req, COOKIE);
+      via = 'cookie';
+    }
     if (!token || token.length > 200) return null;
     const d = this.shelf.deviceByTokenHash(sha256(token));
-    if (d) this.shelf.touchDevice(d.id);
+    if (!d) return null;
+    this.shelf.touchDevice(d.id);
+    d._token = token;
+    d._via = via;
     return d;
   }
 
@@ -286,20 +338,39 @@ class Web {
     return this.statics.get(name);
   }
 
+  // The page is always revalidated (cheaply, by ETag) so an update reaches
+  // the phone on its next open; the script and stylesheet are referenced
+  // with the version in their URL, so they can be cached hard.
   _serveStatic(req, res, [name, type]) {
-    const body = this._static(name);
+    let body = this._static(name);
     if (!body) return send(res, 404, { error: 'not found' });
     const isHtml = type.startsWith('text/html');
+    if (isHtml) body = Buffer.from(body.toString('utf8').split('__SHELF_V__').join(encodeURIComponent(this.version)), 'utf8');
+    const etag = `"${sha256(body).slice(0, 32)}"`;
+    const isWorker = name === 'sw.js';
+    const versioned = !isWorker && (name.endsWith('.js') || name.endsWith('.css'));
     const headers = {
       'content-type': type,
-      'content-length': body.length,
-      'cache-control': isHtml ? 'no-cache' : 'public, max-age=3600',
+      etag,
+      'cache-control': process.env.SHELF_DEV ? 'no-store' : isHtml || isWorker ? 'no-cache' : versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=86400',
       'x-content-type-options': 'nosniff',
     };
+    if (isWorker) headers['service-worker-allowed'] = '/';
     if (isHtml) {
-      headers['content-security-policy'] = CSP;
+      const ports = this.ports();
+      const origins = [];
+      for (const h of this.hosts()) {
+        if (ports.http) origins.push(`http://${h}:${ports.http}`);
+        if (ports.https) origins.push(`https://${h}:${ports.https}`);
+      }
+      headers['content-security-policy'] = csp(origins);
       headers['referrer-policy'] = 'no-referrer';
     }
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      return res.end();
+    }
+    headers['content-length'] = body.length;
     res.writeHead(200, headers);
     res.end(req.method === 'HEAD' ? undefined : body);
   }
@@ -344,7 +415,15 @@ class Web {
       const name = String(body.name || '').trim().slice(0, 60) || nameFromUa(ua);
       const d = this.shelf.addDevice({ name, tokenHash: sha256(token), ua });
       this.onPaired(d);
-      return send(res, 200, { token, device: { id: d.id, name: d.name }, computer: { id: this.self.id, name: this.self.name } }), true;
+      return send(res, 200, {
+        token,
+        device: { id: d.id, name: d.name },
+        computer: { id: this.self.id, name: this.self.name },
+        version: this.version,
+        secure: !!req.socket.encrypted,
+        ports: this.ports(),
+        hosts: this.hosts(),
+      }, { 'set-cookie': setCookie(token) }), true;
     }
 
     const device = this.deviceFor(req, url);
@@ -357,14 +436,25 @@ class Web {
         const d = this.shelf.items.get(device.id);
         return send(res, 200, { device: { id: d.id, name: d.name } }), true;
       }
+      const extra = {};
+      // A phone that arrived with its token in the address (the switch to the
+      // secure or the stable address) gets the cookie for this address too.
+      if (device && device._via !== 'cookie') extra['set-cookie'] = setCookie(device._token);
       return send(res, 200, {
         paired: !!device,
         device: device ? { id: device.id, name: device.name } : null,
+        token: device ? device._token : undefined,
         computer: { id: this.self.id, name: this.self.name },
         version: this.version,
         secure: !!req.socket.encrypted,
         ports: this.ports(),
-      }), true;
+        hosts: this.hosts(),
+      }, extra), true;
+    }
+
+    if (p === '/api/forget' && method === 'POST') {
+      if (device) this.shelf.removeDevice(device.id);
+      return send(res, 200, { ok: true }, { 'set-cookie': clearCookie() }), true;
     }
 
     if (!device) return send(res, 401, { error: 'not paired' }), true;

@@ -7,17 +7,23 @@
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'shelf.token';
+const LAST_KEY = 'shelf.last';
+const HOME_KEY = 'shelf.homeHintDone';
 const PREPARED_LIMIT = 400 * 1024 * 1024;
 const PREFETCH_LIMIT = 80 * 1024 * 1024;
 const SHARE_LIMIT = 200 * 1024 * 1024;
 
 const canShareFiles = !!(window.isSecureContext && navigator.share && navigator.canShare);
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isAndroid = /Android/.test(navigator.userAgent);
 
 let token = null;
 let state = null;
 let me = null;
 let es = null;
 let online = false;
+let lastSyncAt = 0;
+let fromCache = false;
 let selecting = false;
 let viewing = null;
 let suppressClick = false;
@@ -160,7 +166,7 @@ async function pair(body) {
     try {
       localStorage.setItem(TOKEN_KEY, token);
     } catch {}
-    me = { paired: true, device: json.device, computer: json.computer };
+    me = { ...json, paired: true, token: undefined };
     toast(`Connected to ${json.computer.name}`);
     enterApp();
   } catch (err) {
@@ -174,12 +180,36 @@ function onUnpaired() {
     es = null;
   }
   token = null;
+  state = null;
   try {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(LAST_KEY);
   } catch {}
   closeViewer(false);
   closeSheets();
   showPair('This phone is no longer on the shelf. Scan the QR code on your computer to connect again.');
+}
+
+// The shelf as it was the last time the computer answered, so opening the
+// bookmark shows something at once and survives the computer being asleep.
+function loadCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(LAST_KEY));
+    return c && c.state && c.me ? c : null;
+  } catch {
+    return null;
+  }
+}
+
+let cacheTimer = null;
+function saveCache() {
+  if (!state || !me || fromCache) return;
+  clearTimeout(cacheTimer);
+  cacheTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(LAST_KEY, JSON.stringify({ at: lastSyncAt, state, me }));
+    } catch {}
+  }, 1500);
 }
 
 async function boot() {
@@ -192,42 +222,89 @@ async function boot() {
   if (code || handed) history.replaceState(null, '', location.pathname);
   if (code) return pair({ code });
   if (handed) {
-    // Came over from the plain address with this phone's existing token.
+    // Came over from another of this computer's addresses with the token.
     token = handed;
     try {
       localStorage.setItem(TOKEN_KEY, token);
     } catch {}
   }
-  if (!token) return showPair();
+  const cached = loadCache();
+  // Ask the computer who this phone is. The cookie it set when the phone
+  // paired answers even when the browser has emptied this page's storage.
   let r = null;
   try {
-    r = await fetch('/api/me', { headers: auth() }).then((x) => x.json());
+    r = await fetch('/api/me', { headers: auth(), cache: 'no-store' }).then((x) => x.json());
   } catch {}
-  if (!r) {
-    showPair('Your computer is not answering. Make sure Shelf is open on it and that this phone is on the same Wi-Fi.');
-    return;
+  if (r && r.paired) {
+    if (r.token && r.token !== token) {
+      token = r.token;
+      try {
+        localStorage.setItem(TOKEN_KEY, token);
+      } catch {}
+    }
+    me = r;
+    return enterApp({ cached });
   }
-  if (!r.paired) return onUnpaired();
-  me = r;
-  enterApp();
+  if (r && r.paired === false) {
+    if (token || cached) return onUnpaired();
+    return showPair();
+  }
+  // The computer is not answering. A phone that was on the shelf keeps the
+  // page and waits; the stream reconnects by itself when the computer is back.
+  if (token || cached) {
+    me = (cached && cached.me) || { computer: { name: 'your computer' }, device: null };
+    return enterApp({ cached, offline: true });
+  }
+  showPair('Your computer is not answering. Make sure Shelf is open on it and that this phone is on the same Wi-Fi.');
 }
 
 // ---- live state ----
 
-function enterApp() {
+// On the secure address the page can keep itself, so the bookmark opens
+// even while the computer is asleep; everything else always comes live.
+function keepShell() {
+  if (!window.isSecureContext || !('serviceWorker' in navigator)) return;
+  const v = (document.querySelector('script[src*="app.js"]') || {}).src || '';
+  const m = /[?&]v=([^&]+)/.exec(v);
+  navigator.serviceWorker.register(`/sw.js?v=${m ? m[1] : '0'}`).catch(() => {});
+}
+
+function enterApp({ cached = null, offline = false } = {}) {
   $('pair').hidden = true;
   $('app').hidden = false;
   $('computer').textContent = me.computer.name;
+  keepShell();
+  if (cached && cached.state && !state) {
+    fromCache = true;
+    lastSyncAt = cached.at || 0;
+    apply(cached.state);
+  }
   renderSettings();
+  if (offline) setOnline(false);
   connect();
+  maybeShowHomeCard();
 }
 
 function setOnline(on) {
+  const was = online;
   online = on;
   $('dot').classList.toggle('on', on);
   const b = $('banner');
   b.hidden = on;
-  if (!on) b.textContent = `Reconnecting to ${me ? me.computer.name : 'your computer'}`;
+  if (!on) {
+    const name = me ? me.computer.name : 'your computer';
+    b.textContent = lastSyncAt
+      ? `Looking for ${name}. Showing the shelf as it was at ${fmtWhen(lastSyncAt)}.`
+      : `Looking for ${name}`;
+  }
+  if (on && !was) retryImages();
+}
+
+// Thumbnails that failed while the computer was away load again now.
+function retryImages() {
+  for (const row of tiles.values()) {
+    if (row.key.src && !row.el.classList.contains('loaded')) row.parts.img.src = `${row.key.src}&r=${Date.now()}`;
+  }
 }
 
 let lastBeat = 0;
@@ -238,6 +315,8 @@ function connect() {
   lastBeat = Date.now();
   es.addEventListener('state', (e) => {
     lastBeat = Date.now();
+    lastSyncAt = Date.now();
+    fromCache = false;
     setOnline(true);
     try {
       apply(JSON.parse(e.data));
@@ -281,7 +360,10 @@ async function checkStillPaired() {
 
 async function refresh() {
   try {
-    apply(await api('/api/state'));
+    const s = await api('/api/state');
+    lastSyncAt = Date.now();
+    fromCache = false;
+    apply(s);
     setOnline(true);
   } catch {}
 }
@@ -299,7 +381,78 @@ function apply(s) {
   render();
   if (viewing) renderViewer();
   if (!$('sheet-settings').hidden) renderSettings();
+  saveCache();
 }
+
+// ---- home screen ----
+
+function homeHintDone() {
+  try {
+    return localStorage.getItem(HOME_KEY) === '1';
+  } catch {
+    return true;
+  }
+}
+
+function dismissHomeCard() {
+  try {
+    localStorage.setItem(HOME_KEY, '1');
+  } catch {}
+  $('home-card').hidden = true;
+}
+
+function maybeShowHomeCard() {
+  $('home-card').hidden = homeHintDone();
+}
+
+function stableHost() {
+  const h = me && me.hosts && me.hosts[0];
+  if (!h || h === location.hostname.toLowerCase()) return null;
+  return h;
+}
+
+function stableUrl(host) {
+  return `${location.protocol}//${host}${location.port ? ':' + location.port : ''}/`;
+}
+
+function addSteps() {
+  if (isIOS) return ['Tap the Share button at the bottom of Safari (the square with the arrow).', 'Scroll the sheet and tap Add to Home Screen, then Add.'];
+  if (isAndroid) return ['Open the browser menu (the three dots).', 'Tap Add to Home screen, then Add.'];
+  return ['Bookmark this page, or pin it in your browser.'];
+}
+
+// The computer's name on the network stays the same when its address
+// changes, so that is the address a bookmark should hold. The phone checks
+// it can reach the name before going there.
+async function goStable() {
+  const host = stableHost();
+  if (!host || !token) return;
+  const btn = $('btn-stable');
+  btn.disabled = true;
+  btn.textContent = 'Checking';
+  const url = stableUrl(host);
+  let ok = false;
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 5000);
+    await fetch(url + 'api/me', { mode: 'no-cors', cache: 'no-store', signal: ac.signal });
+    clearTimeout(t);
+    ok = true;
+  } catch {}
+  btn.disabled = false;
+  btn.textContent = 'Use the stable address';
+  if (!ok) return toast(`This phone cannot find ${host} on this Wi-Fi. Add the bookmark at this address instead.`);
+  location.href = `${url}#t=${encodeURIComponent(token)}`;
+}
+
+$('home-later').addEventListener('click', dismissHomeCard);
+$('home-show').addEventListener('click', () => {
+  dismissHomeCard();
+  renderSettings();
+  $('sheet-settings').hidden = false;
+  setTimeout(() => $('home-section').scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
+});
+$('btn-stable').addEventListener('click', goStable);
 
 // ---- rendering ----
 
@@ -940,6 +1093,23 @@ function renderSettings() {
   if (document.activeElement !== $('set-name')) $('set-name').value = me.device ? me.device.name : '';
   $('set-computer').textContent = me.computer.name;
   $('version').textContent = state ? `Shelf ${state.version} on ${me.computer.name}` : '';
+
+  const host = stableHost();
+  const onStable = !!(me.hosts && me.hosts.includes(location.hostname.toLowerCase()));
+  $('home-text').textContent = onStable
+    ? `This page is at ${location.hostname}, a name that stays the same even when the computer's network address changes, so a bookmark here keeps working. Add it to your Home Screen:`
+    : host
+      ? `A bookmark at this address breaks if the computer's network address ever changes. Its name on the network, ${host}, does not change, so use that for the bookmark:`
+      : 'Add this page to your Home Screen so the shelf is one tap away:';
+  $('btn-stable').hidden = !host || onStable;
+  const homeSteps = $('home-steps');
+  homeSteps.replaceChildren();
+  if (host && !onStable) homeSteps.appendChild(el('li', null, 'Tap Use the stable address below. The shelf opens again at the new address, already signed in.'));
+  for (const s of addSteps()) homeSteps.appendChild(el('li', null, s));
+  homeSteps.appendChild(el('li', null, window.isSecureContext
+    ? 'That is it. The icon and the name are set. The bookmark opens even while the computer is asleep, shows the shelf as it was, and reconnects on its own.'
+    : 'That is it. The icon and the name are set, and the page reconnects on its own every time. On this plain address it can only open while Shelf is running on the computer; the secure address below also opens while the computer is asleep.'));
+
   const httpsPort = me.ports && me.ports.https;
   const text = $('secure-text');
   const steps = $('cert-steps');
@@ -990,8 +1160,12 @@ $('set-name').addEventListener('change', async (e) => {
     toast(err.message);
   }
 });
-$('btn-forget').addEventListener('click', () => {
+$('btn-forget').addEventListener('click', async () => {
   if (!confirm('Forget this phone? You will need to scan the QR code again to reconnect.')) return;
+  // Tell the computer too, so the token is dead everywhere, not just here.
+  try {
+    await fetch('/api/forget', { method: 'POST', headers: auth() });
+  } catch {}
   onUnpaired();
   closeSheets();
 });

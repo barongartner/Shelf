@@ -518,6 +518,10 @@ function snapshot() {
     phone: {
       url,
       base: phoneUrl(false),
+      stable: (() => {
+        const h = net.addresses.hosts.find((x) => x.endsWith('.local'));
+        return h ? `http://${h}:${net.port}/` : null;
+      })(),
       secureBase: phoneSecureUrl(),
       qr: ensureQr(url),
       pin: pair ? pair.pin : null,

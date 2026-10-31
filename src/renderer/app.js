@@ -400,6 +400,8 @@ function renderPhone() {
     ph.textContent = p.address ? 'Making the code' : 'No network';
   }
   $('phone-base').textContent = p.base || '';
+  $('phone-stable').hidden = !p.stable;
+  $('phone-stable').textContent = p.stable ? `or ${p.stable} (stays the same if the address changes)` : '';
   $('phone-pin').textContent = p.pin ? `${p.pin.slice(0, 3)} ${p.pin.slice(3)}` : '';
   renderPairExpiry();
 
