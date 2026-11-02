@@ -200,6 +200,33 @@ function setManifestToken() {
   if (link) link.href = token ? `/manifest.webmanifest?t=${encodeURIComponent(token)}` : '/manifest.webmanifest';
 }
 
+// While the page is signed in, in a browser, its address carries a handoff
+// code the computer honours for ten minutes. Whatever loads that address to
+// make the Home Screen app, even with no cookies and no script of its own,
+// gets a page and a manifest with the token in them. The code is renewed
+// while the page is open; an old one in the history is just dead.
+let handoffTimer = null;
+let handoffUntil = 0;
+
+async function refreshHandoff() {
+  if (standalone || !token) return;
+  clearTimeout(handoffTimer);
+  if (handoffUntil - Date.now() > 90000) {
+    handoffTimer = setTimeout(refreshHandoff, handoffUntil - Date.now() - 60000);
+    return;
+  }
+  try {
+    const r = await api('/api/handoff', { method: 'POST' });
+    if (!token) return;
+    handoffUntil = r.expiresAt;
+    // The viewer keeps its own entry in the history; only the address changes.
+    history.replaceState(history.state, '', `${location.pathname}?h=${encodeURIComponent(r.code)}`);
+    handoffTimer = setTimeout(refreshHandoff, Math.max(30000, r.expiresAt - Date.now() - 60000));
+  } catch {
+    handoffTimer = setTimeout(refreshHandoff, 60000);
+  }
+}
+
 async function pair(body) {
   showBusy('Connecting to your computer');
   try {
@@ -210,6 +237,7 @@ async function pair(body) {
     me = { ...json, paired: true, token: undefined };
     if (await moveToBetter(json)) return;
     toast(`Connected to ${json.computer.name}`);
+    refreshHandoff();
     enterApp();
   } catch (err) {
     showPair(null, err.message);
@@ -222,6 +250,9 @@ function onUnpaired() {
     es = null;
   }
   storeToken(null);
+  clearTimeout(handoffTimer);
+  handoffUntil = 0;
+  history.replaceState(history.state, '', location.pathname);
   state = null;
   try {
     localStorage.removeItem(LAST_KEY);
@@ -274,7 +305,11 @@ async function boot() {
   const h = new URLSearchParams(location.hash.replace(/^#/, ''));
   const code = h.get('p') || q.get('p');
   const handed = h.get('t') || q.get('t');
-  if (location.search || location.hash) history.replaceState(null, '', location.pathname);
+  // A handoff code in the address (see refreshHandoff) signs this page in
+  // when its storage is empty: a private tab, or the view the system opens
+  // to make the Home Screen app.
+  const hand = token ? null : q.get('h');
+  if (location.search || location.hash) history.replaceState(history.state, '', location.pathname);
   if (code) return pair({ code });
   if (handed) storeToken(handed);
   const cached = loadCache();
@@ -291,13 +326,14 @@ async function boot() {
   // paired answers even when the browser has emptied this page's storage.
   let r = null;
   try {
-    r = await fetch('/api/me', { headers: auth(), cache: 'no-store', signal: timeoutSignal(8000) }).then((x) => x.json());
+    r = await fetch(hand ? `/api/me?h=${encodeURIComponent(hand)}` : '/api/me', { headers: auth(), cache: 'no-store', signal: timeoutSignal(8000) }).then((x) => x.json());
   } catch {}
   if (r && r.paired) {
     if (r.token && r.token !== token) storeToken(r.token);
     me = { ...r, token: undefined };
     if (await moveToBetter(r)) return;
     setManifestToken();
+    refreshHandoff();
     if (handed) toast(`Connected to ${r.computer.name}`);
     if ($('app').hidden) return enterApp({ cached });
     $('computer').textContent = me.computer.name;
@@ -357,7 +393,10 @@ function setOnline(on) {
       ? `Looking for ${name}. Showing the shelf as it was at ${fmtWhen(lastSyncAt)}.`
       : `Looking for ${name}`;
   }
-  if (on && !was) retryImages();
+  if (on && !was) {
+    retryImages();
+    refreshHandoff();
+  }
 }
 
 // Thumbnails that failed while the computer was away load again now.

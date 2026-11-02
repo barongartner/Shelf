@@ -151,6 +151,36 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
     assert.strictEqual((await call(a.base, `/manifest.webmanifest?t=${tok}`)).json.start_url, '/', 'a forgotten phone gets a plain manifest');
   });
 
+  await t.test('a handoff code in the address stands in for the cookie for ten minutes', async () => {
+    assert.strictEqual((await call(a.base, '/api/handoff', { method: 'POST' })).status, 401);
+    const pair = a.net.web.newPair();
+    const r = await call(a.base, '/api/pair', { method: 'POST', body: { code: pair.code } });
+    const tok = r.json.token;
+    const h = await call(a.base, '/api/handoff', { method: 'POST', token: tok });
+    assert.strictEqual(h.status, 200);
+    assert.match(h.json.code, /^[A-Z2-9]{12}$/);
+    assert.ok(h.json.expiresAt > Date.now() + 9 * 60 * 1000);
+    // No cookie, no header: the code alone signs the page, the manifest and /api/me.
+    const page = (await call(a.base, `/?h=${h.json.code}`, { raw: true })).buf.toString();
+    assert.ok(page.includes(`<link rel="manifest" href="/manifest.webmanifest?t=${tok}" />`), 'the markup carries the token');
+    assert.strictEqual((await call(a.base, `/manifest.webmanifest?h=${h.json.code}`)).json.start_url, `/?t=${tok}`);
+    const me = await call(a.base, `/api/me?h=${h.json.code}`);
+    assert.strictEqual(me.json.paired, true);
+    assert.strictEqual(me.json.token, tok);
+    assert.match(me.headers.get('set-cookie') || '', /^shelf=/, 'the view that used the code gets the cookie too');
+    // One live code per phone; a new one retires the old one.
+    const h2 = await call(a.base, '/api/handoff', { method: 'POST', token: tok });
+    assert.strictEqual([...a.net.web.handoffs.values()].filter((x) => x.deviceId === r.json.device.id).length, 1);
+    assert.strictEqual((await call(a.base, `/api/me?h=${h.json.code}`)).json.paired, false, 'the old code is dead');
+    assert.strictEqual((await call(a.base, `/api/me?h=${h2.json.code}`)).json.paired, true);
+    // Expired codes are refused and dropped.
+    a.net.web.handoffs.get(h2.json.code).expiresAt = Date.now() - 1;
+    assert.strictEqual((await call(a.base, `/api/me?h=${h2.json.code}`)).json.paired, false);
+    assert.strictEqual(a.net.web.handoffs.size, 0);
+    assert.strictEqual((await call(a.base, '/api/me?h=NOPE')).json.paired, false);
+    a.shelf.removeDevice(r.json.device.id);
+  });
+
   await t.test('nothing works before pairing', async () => {
     assert.strictEqual((await call(a.base, '/api/state')).status, 401);
     assert.strictEqual((await call(a.base, '/api/me')).json.paired, false);

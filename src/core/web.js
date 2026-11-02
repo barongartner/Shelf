@@ -21,6 +21,7 @@ const TEXT_LIMIT = 256 * 1024;
 const MAX_THUMBS = 400;
 const UPLOAD_IDLE_MS = 60 * 1000;
 const MANIFEST_LIMIT = 2000;
+const HANDOFF_TTL = 10 * 60 * 1000;
 
 // Safari asks for the home-screen icon at these root paths on its own, with
 // no cookies and no token, so they are public like the page itself. The
@@ -129,6 +130,7 @@ class Web {
     this.hosts = hosts;
     this.pair = null;
     this.fails = new Map(); // ip -> { n, until }
+    this.handoffs = new Map(); // code -> { token, deviceId, expiresAt }
     this.clients = new Set(); // SSE responses
     this.statics = new Map();
     this.thumbs = new Map(); // id -> { buf, type } | null
@@ -204,10 +206,36 @@ class Web {
 
   // ---- auth ----
 
+  // A handoff code stands in for the phone's token for ten minutes. The page
+  // keeps a live one in its address while it is signed in, so that whatever
+  // reads the page to make a Home Screen app (Safari, another browser, a
+  // system view with no cookies and no script of its own) gets a manifest
+  // with the token in it. One live code per phone.
+  _newHandoff(device) {
+    const now = Date.now();
+    for (const [code, h] of this.handoffs) if (h.expiresAt <= now || h.deviceId === device.id) this.handoffs.delete(code);
+    const code = randomCode(12);
+    const expiresAt = now + HANDOFF_TTL;
+    this.handoffs.set(code, { token: device._token, deviceId: device.id, expiresAt });
+    return { code, expiresAt };
+  }
+
+  _handoff(code) {
+    if (typeof code !== 'string' || code.length !== 12) return null;
+    const h = this.handoffs.get(normCode(code));
+    if (!h) return null;
+    if (h.expiresAt <= Date.now()) {
+      this.handoffs.delete(normCode(code));
+      return null;
+    }
+    return h;
+  }
+
   // The token can come in a header, in the query string (images, downloads
-  // and the event stream cannot set headers) or in the cookie the server
-  // set when the phone paired. The cookie is what survives Safari throwing
-  // away a site's script storage after a week of not being opened.
+  // and the event stream cannot set headers), in the cookie the server set
+  // when the phone paired, or through a handoff code in the query string.
+  // The cookie is what survives Safari throwing away a site's script
+  // storage after a week of not being opened.
   deviceFor(req, url) {
     const h = req.headers.authorization;
     let token = null;
@@ -223,6 +251,11 @@ class Web {
     if (!token) {
       token = cookieValue(req, COOKIE);
       via = 'cookie';
+    }
+    if (!token) {
+      const hand = this._handoff(url.searchParams.get('h'));
+      token = hand ? hand.token : null;
+      via = 'handoff';
     }
     if (!token || token.length > 200) return null;
     const d = this.shelf.deviceByTokenHash(sha256(token));
@@ -526,6 +559,11 @@ class Web {
     if (p === '/api/forget' && method === 'POST') {
       if (device) this.shelf.removeDevice(device.id);
       return send(res, 200, { ok: true }, { 'set-cookie': clearCookie() }), true;
+    }
+
+    if (p === '/api/handoff' && method === 'POST') {
+      if (!device) return send(res, 401, { error: 'not paired' }), true;
+      return send(res, 200, this._newHandoff(device)), true;
     }
 
     if (!device) return send(res, 401, { error: 'not paired' }), true;
