@@ -125,6 +125,32 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
     }
   });
 
+  await t.test('the manifest makes a standalone app whose start page carries the token of the phone asking', async () => {
+    const anon = await call(a.base, '/manifest.webmanifest');
+    assert.strictEqual(anon.status, 200);
+    assert.strictEqual(anon.headers.get('content-type'), 'application/manifest+json');
+    assert.strictEqual(anon.headers.get('cache-control'), 'no-store', 'made per phone, never cached');
+    assert.strictEqual(anon.json.display, 'standalone');
+    assert.strictEqual(anon.json.start_url, '/', 'nobody signed in, nothing to hand over');
+    assert.strictEqual(anon.json.scope, '/');
+    assert.ok(anon.json.icons.some((i) => i.src === '/apple-touch-icon.png' && i.sizes === '180x180'));
+    const pair = a.net.web.newPair();
+    const r = await call(a.base, '/api/pair', { method: 'POST', body: { code: pair.code } });
+    const tok = r.json.token;
+    // The page puts the token in the manifest link; the cookie covers a fetch without it.
+    assert.strictEqual((await call(a.base, `/manifest.webmanifest?t=${tok}`)).json.start_url, `/?t=${tok}`);
+    assert.strictEqual((await call(a.base, '/manifest.webmanifest', { headers: { cookie: `shelf=${tok}` } })).json.start_url, `/?t=${tok}`);
+    assert.strictEqual((await call(a.base, '/manifest.webmanifest?t=nope')).json.start_url, '/', 'an unknown token hands nothing over');
+    assert.strictEqual((await call(a.base, '/manifest.webmanifest', { method: 'POST' })).status, 405);
+    assert.strictEqual((await call(a.base, `/?t=${tok}`, { raw: true })).status, 200, 'the start page is the page');
+    const plain = (await call(a.base, '/', { raw: true })).buf.toString();
+    assert.match(plain, /<link rel="manifest" href="\/manifest\.webmanifest" \/>/, 'no cookie, plain link');
+    const known = (await call(a.base, '/', { raw: true, headers: { cookie: `shelf=${tok}` } })).buf.toString();
+    assert.ok(known.includes(`<link rel="manifest" href="/manifest.webmanifest?t=${tok}" />`), 'the cookie puts the token in the markup');
+    a.shelf.removeDevice(r.json.device.id);
+    assert.strictEqual((await call(a.base, `/manifest.webmanifest?t=${tok}`)).json.start_url, '/', 'a forgotten phone gets a plain manifest');
+  });
+
   await t.test('nothing works before pairing', async () => {
     assert.strictEqual((await call(a.base, '/api/state')).status, 401);
     assert.strictEqual((await call(a.base, '/api/me')).json.paired, false);
@@ -340,15 +366,17 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
   });
 
   await t.test('the home-screen icon is a plain, public, opaque PNG at the root', async () => {
-    for (const p of ['/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/apple-touch-icon-180x180.png', '/icon-192.png', '/icon-512.png']) {
+    for (const p of ['/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/apple-touch-icon-180x180.png', '/apple-touch-icon-167x167.png', '/apple-touch-icon-152x152.png', '/apple-touch-icon-120x120.png', '/icon-192.png', '/icon-512.png']) {
       const r = await call(a.base, p, { raw: true });
       assert.strictEqual(r.status, 200, p);
       assert.strictEqual(r.headers.get('content-type'), 'image/png', p);
       assert.strictEqual(r.buf.readUInt32BE(0), 0x89504e47, `${p} is a PNG`);
     }
     const page = (await call(a.base, '/', { raw: true })).buf.toString();
+    assert.match(page, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png"/);
     assert.match(page, /<link rel="apple-touch-icon" sizes="180x180" href="\/apple-touch-icon\.png"/);
-    assert.ok(!/apple-mobile-web-app-capable/.test(page), 'a bookmark, not a standalone app: standalone has its own storage and no certificate prompt');
+    assert.match(page, /<link rel="manifest" href="\/manifest\.webmanifest" \/>/);
+    assert.match(page, /apple-mobile-web-app-capable/, 'opens as an app from the Home Screen; the token in start_url signs it in');
   });
 
   await t.test('the session lives in a cookie too, survives emptied storage, and ends with forget', async () => {

@@ -8,13 +8,22 @@
     <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-title" content="Shelf" />
     <meta name="application-name" content="Shelf" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="format-detection" content="telephone=no" />
     <title>Shelf</title>
     <!-- The home-screen icon is a real, opaque PNG at a plain URL: iOS ignores
-         SVG and data: icons and paints transparent pixels black. -->
+         SVG and data: icons and paints transparent pixels black. The plain
+         link is the one every iOS version understands; the sized one lets
+         newer ones pick. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- The computer fills in the phone's token here when its cookie is on
+         the request, and the page sets it once it is signed in, so the Home
+         Screen app made from this link opens signed in too. -->
+    <link rel="manifest" href="__SHELF_MANIFEST__" />
     <link rel="stylesheet" href="/style.css?v=__SHELF_V__" />
   </head>
   <body>

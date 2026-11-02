@@ -732,7 +732,11 @@ class Net extends EventEmitter {
         req.resume();
         return send(res, 401, pre.clock ? { error: 'clock', serverTime: Date.now() } : { error: 'not on this shelf' });
       }
-      req.socket.setTimeout(BODY_IDLE_MS, () => req.destroy(new Error('sync stalled')));
+      // The listener comes off again afterwards: peers keep the socket alive
+      // across syncs, and one left behind per sync would pile up.
+      const stalled = () => req.destroy(new Error('sync stalled'));
+      req.socket.setTimeout(BODY_IDLE_MS);
+      req.socket.on('timeout', stalled);
       let raw;
       try {
         raw = await readBody(req, MAX_BODY);
@@ -741,6 +745,7 @@ class Net extends EventEmitter {
         throw err;
       } finally {
         req.socket.setTimeout(0);
+        req.socket.off('timeout', stalled);
       }
       const senderId = this._verifyRequest(req, raw);
       if (!senderId) return send(res, 401, { error: 'not on this shelf' });

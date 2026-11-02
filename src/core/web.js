@@ -23,18 +23,21 @@ const UPLOAD_IDLE_MS = 60 * 1000;
 const MANIFEST_LIMIT = 2000;
 
 // Safari asks for the home-screen icon at these root paths on its own, with
-// no cookies and no token, so they are public like the page itself.
+// no cookies and no token, so they are public like the page itself. The
+// manifest is not here: it is made per phone (see _manifest).
 const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/index.html': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
-  '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json'],
   '/sw.js': ['sw.js', 'text/javascript; charset=utf-8'],
   '/icon.svg': ['icon.svg', 'image/svg+xml'],
   '/apple-touch-icon.png': ['apple-touch-icon.png', 'image/png'],
   '/apple-touch-icon-precomposed.png': ['apple-touch-icon.png', 'image/png'],
   '/apple-touch-icon-180x180.png': ['apple-touch-icon.png', 'image/png'],
+  '/apple-touch-icon-167x167.png': ['apple-touch-icon.png', 'image/png'],
+  '/apple-touch-icon-152x152.png': ['apple-touch-icon.png', 'image/png'],
+  '/apple-touch-icon-120x120.png': ['apple-touch-icon.png', 'image/png'],
   '/icon-192.png': ['icon-192.png', 'image/png'],
   '/icon-512.png': ['icon-512.png', 'image/png'],
 };
@@ -364,11 +367,16 @@ class Web {
   // The page is always revalidated (cheaply, by ETag) so an update reaches
   // the phone on its next open; the script and stylesheet are referenced
   // with the version in their URL, so they can be cached hard.
-  _serveStatic(req, res, [name, type]) {
+  _serveStatic(req, res, [name, type], device = null) {
     let body = this._static(name);
     if (!body) return send(res, 404, { error: 'not found' });
     const isHtml = type.startsWith('text/html');
-    if (isHtml) body = Buffer.from(body.toString('utf8').split('__SHELF_V__').join(encodeURIComponent(this.version)), 'utf8');
+    if (isHtml) {
+      // A phone the cookie already knows gets its token in the manifest link
+      // straight from the markup, before any script runs.
+      const manifest = device ? `/manifest.webmanifest?t=${encodeURIComponent(device._token)}` : '/manifest.webmanifest';
+      body = Buffer.from(body.toString('utf8').split('__SHELF_V__').join(encodeURIComponent(this.version)).split('__SHELF_MANIFEST__').join(manifest), 'utf8');
+    }
     const etag = `"${sha256(body).slice(0, 32)}"`;
     const isWorker = name === 'sw.js';
     const versioned = !isWorker && (name.endsWith('.js') || name.endsWith('.css'));
@@ -398,6 +406,40 @@ class Web {
     res.end(req.method === 'HEAD' ? undefined : body);
   }
 
+  // The web app manifest, made for the phone asking. An icon added to the
+  // iOS Home Screen opens as an app with storage of its own, separate from
+  // Safari's, so nothing the phone stored when it paired is there on the
+  // first open. The token rides in start_url instead: the page puts it in
+  // the manifest link, and the cookie covers a fetch that did not carry it.
+  _manifest(req, res, device) {
+    const body = Buffer.from(
+      JSON.stringify({
+        id: '/',
+        name: 'Shelf',
+        short_name: 'Shelf',
+        description: 'The file shelf shared by your computers.',
+        start_url: device ? `/?t=${encodeURIComponent(device._token)}` : '/',
+        scope: '/',
+        display: 'standalone',
+        background_color: '#f2f2f7',
+        theme_color: '#3a63e8',
+        icons: [
+          { src: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' },
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+        ],
+      }),
+      'utf8',
+    );
+    res.writeHead(200, {
+      'content-type': 'application/manifest+json',
+      'content-length': body.length,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    res.end(req.method === 'HEAD' ? undefined : body);
+  }
+
   // ---- request handling ----
 
   // Returns true when the request was one of ours (handled), false to let
@@ -407,9 +449,15 @@ class Web {
     const method = req.method;
     const get = method === 'GET' || method === 'HEAD';
 
+    if (p === '/manifest.webmanifest') {
+      if (!get) return send(res, 405, { error: 'method' }), true;
+      this._manifest(req, res, this.deviceFor(req, url));
+      return true;
+    }
+
     if (STATIC[p]) {
       if (!get) return send(res, 405, { error: 'method' }), true;
-      this._serveStatic(req, res, STATIC[p]);
+      this._serveStatic(req, res, STATIC[p], STATIC[p][1].startsWith('text/html') ? this.deviceFor(req, url) : null);
       return true;
     }
 
@@ -492,7 +540,11 @@ class Web {
       const mtime = Number(url.searchParams.get('mtime')) || null;
       // Nothing arriving for a minute means the phone is gone; the upload is
       // cut so its item disappears everywhere instead of arriving forever.
-      req.socket.setTimeout(UPLOAD_IDLE_MS, () => req.destroy(new Error('upload stalled')));
+      // The listener is taken off again: the socket is kept alive across
+      // uploads, and one left behind per upload would pile up.
+      const stalled = () => req.destroy(new Error('upload stalled'));
+      req.socket.setTimeout(UPLOAD_IDLE_MS);
+      req.socket.on('timeout', stalled);
       try {
         const it = await this.shelf.addUpload({ name, size, stream: req, by: { id: device.id, name: device.name }, mtime });
         return send(res, 201, { item: this.itemView(it) }), true;
@@ -503,6 +555,7 @@ class Web {
       } finally {
         try {
           req.socket.setTimeout(0);
+          req.socket.off('timeout', stalled);
         } catch {}
       }
     }

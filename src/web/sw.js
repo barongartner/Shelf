@@ -1,14 +1,14 @@
 'use strict';
 
 // Service worker for the secure address only (browsers allow one nowhere
-// else). It keeps the page itself and its assets, so a Home Screen bookmark
+// else). It keeps the page itself and its assets, so the Home Screen app
 // opens even while the computer is asleep: the page then shows the shelf as
 // it was and reconnects when the computer answers. Nothing from the API is
-// ever cached here.
+// ever cached here, and neither is the manifest, which is made per phone.
 
 const VERSION = new URL(self.location.href).searchParams.get('v') || '0';
 const CACHE = `shelf-shell-${VERSION}`;
-const SHELL = ['/', `/app.js?v=${VERSION}`, `/style.css?v=${VERSION}`, '/icon.svg', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
+const SHELL = ['/', `/app.js?v=${VERSION}`, `/style.css?v=${VERSION}`, '/icon.svg', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

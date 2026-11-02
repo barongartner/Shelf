@@ -16,6 +16,13 @@ const SHARE_LIMIT = 200 * 1024 * 1024;
 const canShareFiles = !!(window.isSecureContext && navigator.share && navigator.canShare);
 const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isAndroid = /Android/.test(navigator.userAgent);
+// Opened from the Home Screen icon: no browser around the page, and on iOS
+// storage of its own, separate from Safari's.
+const standalone = navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+document.body.classList.toggle('standalone', standalone);
+const PAIR_MSG = standalone
+  ? 'On your computer, click the phone button at the top of the shelf and type the six-digit code shown under the QR code.'
+  : 'Scan the QR code on your computer, or type the six-digit code shown under it.';
 
 let token = null;
 let state = null;
@@ -161,31 +168,51 @@ function showPair(msg, err) {
   $('pair').hidden = false;
   $('pair-busy').hidden = true;
   $('pair-form').hidden = false;
-  if (msg) $('pair-msg').textContent = msg;
+  $('pair-msg').textContent = msg || PAIR_MSG;
   $('pair-err').hidden = !err;
   $('pair-err').textContent = err || '';
 }
 
-async function pair(body) {
+// The pairing card with a spinner: the page is doing something that takes
+// a moment, and a blank screen would look like it froze.
+function showBusy(msg) {
   $('app').hidden = true;
   $('pair').hidden = false;
   $('pair-busy').hidden = false;
   $('pair-form').hidden = true;
   $('pair-err').hidden = true;
-  $('pair-msg').textContent = 'Connecting to your computer';
+  $('pair-msg').textContent = msg;
+}
+
+function storeToken(t) {
+  token = t;
+  try {
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+  setManifestToken();
+}
+
+// The manifest link carries the token, so the Home Screen app iOS makes from
+// this page opens signed in even though its storage is not Safari's.
+function setManifestToken() {
+  const link = document.querySelector('link[rel="manifest"]');
+  if (link) link.href = token ? `/manifest.webmanifest?t=${encodeURIComponent(token)}` : '/manifest.webmanifest';
+}
+
+async function pair(body) {
+  showBusy('Connecting to your computer');
   try {
     const r = await fetch('/api/pair', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const json = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(json.error || 'That did not work');
-    token = json.token;
-    try {
-      localStorage.setItem(TOKEN_KEY, token);
-    } catch {}
+    storeToken(json.token);
     me = { ...json, paired: true, token: undefined };
+    if (await moveToBetter(json)) return;
     toast(`Connected to ${json.computer.name}`);
     enterApp();
   } catch (err) {
-    showPair('Scan the QR code on your computer, or type the six-digit code shown under it.', err.message);
+    showPair(null, err.message);
   }
 }
 
@@ -194,15 +221,18 @@ function onUnpaired() {
     es.close();
     es = null;
   }
-  token = null;
+  storeToken(null);
   state = null;
   try {
-    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(LAST_KEY);
   } catch {}
   closeViewer(false);
   closeSheets();
-  showPair('This phone is no longer on the shelf. Scan the QR code on your computer to connect again.');
+  showPair(
+    standalone
+      ? 'This phone is no longer on the shelf. On your computer, click the phone button and type the six-digit code here to connect again.'
+      : 'This phone is no longer on the shelf. Scan the QR code on your computer to connect again.',
+  );
 }
 
 // The shelf as it was the last time the computer answered, so opening the
@@ -227,50 +257,65 @@ function saveCache() {
   }, 1500);
 }
 
+function timeoutSignal(ms) {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), ms);
+  return ac.signal;
+}
+
 async function boot() {
   try {
     token = localStorage.getItem(TOKEN_KEY);
   } catch {}
+  // A pairing code or a token can arrive in the fragment (the QR code, or a
+  // move between this computer's addresses) or in the query string (the
+  // Home Screen app opens at the start_url its manifest was made with).
+  const q = new URLSearchParams(location.search);
   const h = new URLSearchParams(location.hash.replace(/^#/, ''));
-  const code = h.get('p');
-  const handed = h.get('t');
-  if (code || handed) history.replaceState(null, '', location.pathname);
+  const code = h.get('p') || q.get('p');
+  const handed = h.get('t') || q.get('t');
+  if (location.search || location.hash) history.replaceState(null, '', location.pathname);
   if (code) return pair({ code });
-  if (handed) {
-    // Came over from another of this computer's addresses with the token.
-    token = handed;
-    try {
-      localStorage.setItem(TOKEN_KEY, token);
-    } catch {}
-  }
+  if (handed) storeToken(handed);
   const cached = loadCache();
+  const known = !!(token || cached);
+  // Something on screen at once: the last shelf for a phone that has been
+  // here, a spinner for one that has not (or for a token that just arrived
+  // and is still to be checked). A computer that is off answers nothing for
+  // a long while, and a blank page that long looks broken.
+  if (cached || (token && !handed)) {
+    me = (cached && cached.me) || { computer: { name: 'your computer' }, device: null };
+    enterApp({ cached });
+  } else showBusy('Connecting to your computer');
   // Ask the computer who this phone is. The cookie it set when the phone
   // paired answers even when the browser has emptied this page's storage.
   let r = null;
   try {
-    r = await fetch('/api/me', { headers: auth(), cache: 'no-store' }).then((x) => x.json());
+    r = await fetch('/api/me', { headers: auth(), cache: 'no-store', signal: timeoutSignal(8000) }).then((x) => x.json());
   } catch {}
   if (r && r.paired) {
-    if (r.token && r.token !== token) {
-      token = r.token;
-      try {
-        localStorage.setItem(TOKEN_KEY, token);
-      } catch {}
-    }
-    me = r;
-    return enterApp({ cached });
+    if (r.token && r.token !== token) storeToken(r.token);
+    me = { ...r, token: undefined };
+    if (await moveToBetter(r)) return;
+    setManifestToken();
+    if (handed) toast(`Connected to ${r.computer.name}`);
+    if ($('app').hidden) return enterApp({ cached });
+    $('computer').textContent = me.computer.name;
+    renderSettings();
+    return;
   }
   if (r && r.paired === false) {
-    if (token || cached) return onUnpaired();
+    if (known) return onUnpaired();
     return showPair();
   }
   // The computer is not answering. A phone that was on the shelf keeps the
   // page and waits; the stream reconnects by itself when the computer is back.
-  if (token || cached) {
+  if (!known) return showPair('Your computer is not answering. Make sure Shelf is open on it and that this phone is on the same Wi-Fi.');
+  if ($('app').hidden) {
     me = (cached && cached.me) || { computer: { name: 'your computer' }, device: null };
-    return enterApp({ cached, offline: true });
+    enterApp({ cached });
   }
-  showPair('Your computer is not answering. Make sure Shelf is open on it and that this phone is on the same Wi-Fi.');
+  setOnline(false);
 }
 
 // ---- live state ----
@@ -284,7 +329,7 @@ function keepShell() {
   navigator.serviceWorker.register(`/sw.js?v=${m ? m[1] : '0'}`).catch(() => {});
 }
 
-function enterApp({ cached = null, offline = false } = {}) {
+function enterApp({ cached = null } = {}) {
   $('pair').hidden = true;
   $('app').hidden = false;
   $('computer').textContent = me.computer.name;
@@ -295,7 +340,6 @@ function enterApp({ cached = null, offline = false } = {}) {
     apply(cached.state);
   }
   renderSettings();
-  if (offline) setOnline(false);
   connect();
   probeCookie();
   maybeShowHomeCard();
@@ -418,7 +462,7 @@ function dismissHomeCard() {
 }
 
 function maybeShowHomeCard() {
-  $('home-card').hidden = homeHintDone();
+  $('home-card').hidden = standalone || homeHintDone();
 }
 
 function stableHost() {
@@ -427,38 +471,63 @@ function stableHost() {
   return h;
 }
 
-function stableUrl(host) {
-  return `${location.protocol}//${host}${location.port ? ':' + location.port : ''}/`;
-}
-
 function addSteps() {
   if (isIOS) return ['Tap the Share button at the bottom of Safari (the square with the arrow).', 'Scroll the sheet and tap Add to Home Screen, then Add.'];
   if (isAndroid) return ['Open the browser menu (the three dots).', 'Tap Add to Home screen, then Add.'];
   return ['Bookmark this page, or pin it in your browser.'];
 }
 
-// The computer's name on the network stays the same when its address
-// changes, so that is the address a bookmark should hold. The phone checks
-// it can reach the name before going there.
+// Whether another of this computer's addresses answers from this phone. A
+// no-cors fetch says nothing about the answer, only that one came; a
+// certificate the phone does not trust fails it, which is the point.
+async function reachable(url) {
+  try {
+    await fetch(url + 'api/me', { mode: 'no-cors', cache: 'no-store', signal: timeoutSignal(3000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The address a Home Screen icon should hold: the computer's name on the
+// network, which stays the same when its address changes, and secure when
+// this phone trusts the computer's certificate. Only a step up from the
+// current address is ever taken, never a step down.
+async function betterAddress(info) {
+  const host = info && info.hosts && info.hosts[0];
+  const ports = (info && info.ports) || {};
+  if (!host) return null;
+  const onHost = location.hostname.toLowerCase() === host;
+  const secure = location.protocol === 'https:';
+  const tries = [];
+  if (ports.https && !(onHost && secure)) tries.push(`https://${host}:${ports.https}/`);
+  if (ports.http && !onHost && !secure) tries.push(`http://${host}:${ports.http}/`);
+  if (!tries.length) return null;
+  const ok = await Promise.all(tries.map(reachable));
+  const i = ok.indexOf(true);
+  return i < 0 ? null : tries[i];
+}
+
+// Moves the page to the better address, signed in: the token rides in the
+// fragment, which never leaves the phone. The Home Screen app stays where
+// it is; its address was fixed when it was added.
+async function moveToBetter(info) {
+  if (standalone || !token) return false;
+  const url = await betterAddress(info);
+  if (!url) return false;
+  location.replace(`${url}#t=${encodeURIComponent(token)}`);
+  return true;
+}
+
 async function goStable() {
-  const host = stableHost();
-  if (!host || !token) return;
+  if (!token) return;
   const btn = $('btn-stable');
   btn.disabled = true;
   btn.textContent = 'Checking';
-  const url = stableUrl(host);
-  let ok = false;
-  try {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 5000);
-    await fetch(url + 'api/me', { mode: 'no-cors', cache: 'no-store', signal: ac.signal });
-    clearTimeout(t);
-    ok = true;
-  } catch {}
+  const moved = await moveToBetter(me);
   btn.disabled = false;
   btn.textContent = 'Use the stable address';
-  if (!ok) return toast(`This phone cannot find ${host} on this Wi-Fi. Add the bookmark at this address instead.`);
-  location.href = `${url}#t=${encodeURIComponent(token)}`;
+  if (!moved) toast(`This phone cannot find ${stableHost() || 'the computer'} on this Wi-Fi right now. Add the icon at this address instead.`);
 }
 
 $('home-later').addEventListener('click', dismissHomeCard);
@@ -1126,19 +1195,24 @@ function renderSettings() {
 
   const host = stableHost();
   const onStable = !!(me.hosts && me.hosts.includes(location.hostname.toLowerCase()));
-  $('home-text').textContent = onStable
-    ? `This page is at ${location.hostname}, a name that stays the same even when the computer's network address changes, so a bookmark here keeps working. Add it to your Home Screen:`
-    : host
-      ? `A bookmark at this address breaks if the computer's network address ever changes. Its name on the network, ${host}, does not change, so use that for the bookmark:`
-      : 'Add this page to your Home Screen so the shelf is one tap away:';
-  $('btn-stable').hidden = !host || onStable;
   const homeSteps = $('home-steps');
   homeSteps.replaceChildren();
-  if (host && !onStable) homeSteps.appendChild(el('li', null, 'Tap Use the stable address below. The shelf opens again at the new address, already signed in.'));
-  for (const s of addSteps()) homeSteps.appendChild(el('li', null, s));
-  homeSteps.appendChild(el('li', null, window.isSecureContext
-    ? 'That is it. The icon and the name are set. The bookmark opens even while the computer is asleep, shows the shelf as it was, and reconnects on its own.'
-    : 'That is it. The icon and the name are set, and the page reconnects on its own every time. On this plain address it can only open while Shelf is running on the computer; the secure address below also opens while the computer is asleep.'));
+  if (standalone) {
+    $('home-text').textContent = 'Shelf is on your Home Screen. It opens from the icon signed in, shows the shelf as it was, and reconnects on its own.';
+    $('btn-stable').hidden = true;
+  } else {
+    $('home-text').textContent = onStable
+      ? `This page is at ${location.hostname}, a name that stays the same even when the computer's network address changes, so an icon added here keeps working. Add it to your Home Screen:`
+      : host
+        ? `An icon added at this address stops working if the computer's network address ever changes. Its name on the network, ${host}, does not change, so the page moves there when the phone can reach it:`
+        : 'Add this page to your Home Screen so the shelf is one tap away:';
+    $('btn-stable').hidden = !host || onStable;
+    if (host && !onStable) homeSteps.appendChild(el('li', null, 'Tap Use the stable address below. The shelf opens again at the new address, already signed in.'));
+    for (const s of addSteps()) homeSteps.appendChild(el('li', null, s));
+    homeSteps.appendChild(el('li', null, window.isSecureContext
+      ? 'That is it. The icon opens Shelf like an app, signed in, even while the computer is asleep: it shows the shelf as it was and reconnects on its own.'
+      : 'That is it. The icon opens Shelf like an app, signed in, and it reconnects on its own. On this plain address it can only open while Shelf is running on the computer; the secure address below also opens while the computer is asleep.'));
+  }
 
   const httpsPort = me.ports && me.ports.https;
   const text = $('secure-text');
@@ -1148,7 +1222,13 @@ function renderSettings() {
     text.textContent = canShareFiles
       ? 'You are on the secure address: Save to Photos works with one tap, for many photos at once. If Safari still warns about the certificate when you open this page, install it once:'
       : 'You are on the secure address. If Safari still warns about the certificate when you open this page, install it once:';
-    steps.hidden = false;
+    steps.hidden = standalone;
+    btn.hidden = true;
+  } else if (httpsPort && standalone) {
+    // Profiles install from Safari, not from an app, and the app cannot
+    // change its own address: the secure version is added from Safari.
+    text.textContent = `Right now, open a photo and press and hold it to save it to Photos, one at a time. For one-tap saving of many photos, open ${location.host} in Safari, follow the steps under Save to Photos there, and add Shelf to the Home Screen again from the secure address.`;
+    steps.hidden = true;
     btn.hidden = true;
   } else if (httpsPort) {
     text.textContent = 'Right now, open a photo and press and hold it to save it to Photos, one at a time. For one-tap saving of many photos, switch to the secure address: install this computer’s certificate once, trust it, then tap the button.';
@@ -1191,7 +1271,7 @@ $('set-name').addEventListener('change', async (e) => {
   }
 });
 $('btn-forget').addEventListener('click', async () => {
-  if (!confirm('Forget this phone? You will need to scan the QR code again to reconnect.')) return;
+  if (!confirm(standalone ? 'Forget this phone? You will need a new code from your computer to reconnect.' : 'Forget this phone? You will need to scan the QR code again to reconnect.')) return;
   // Tell the computer too, so the token is dead everywhere, not just here.
   try {
     await fetch('/api/forget', { method: 'POST', headers: auth() });

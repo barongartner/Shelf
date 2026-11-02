@@ -62,18 +62,24 @@ to hide.
 2. Point the phone's camera at it and open the link. The shelf opens in the browser; there
    is nothing to install. (No camera handy? Open the address shown under the code and type
    the six-digit code.)
-3. Put it on the Home Screen: the page offers this the first time, and Settings on the page
-   walks through it. Tap **Use the stable address** first (it moves the page to the
-   computer's name on the network, which does not change when its address does), then
-   Share, Add to Home Screen. The icon and the name are set.
+3. Put it on the Home Screen: Share, Add to Home Screen. The page offers this the first
+   time and Settings on the page walks through it. The icon and the name are set, and the
+   icon opens Shelf like an app, already signed in.
 
 The phone stays signed in from then on: the computer remembers it, the page keeps a cookie
 and a copy of the last shelf, and it reconnects by itself every time it opens, so the QR
 code is a one-time thing. If the computer is asleep when the page is open, it says so and
 picks up where it left off when the computer wakes. On the secure address (see below) the
-bookmark even opens while the computer is asleep and shows the shelf as it was. You only
-scan again if you remove the phone in the phone panel on a computer, or tap **Forget this
-phone** on the page.
+Home Screen app even opens while the computer is asleep and shows the shelf as it was. You
+only scan again if you remove the phone in the phone panel on a computer, or tap **Forget
+this phone** on the page.
+
+Two details behind that. The page moves itself to the computer's name on the network
+(`PCNAME.local`) as soon as the phone can reach it, because that name stays the same when
+the computer's address changes, so an icon added there keeps working. And an icon added to
+the iOS Home Screen opens as an app with storage of its own, separate from Safari's, so the
+app is handed the phone's token through its manifest: no second code, no second phone on
+the shelf.
 
 On the phone, photos and videos show as a grid and everything else as a list. Tap to open.
 To get a photo into the Photos app, open it and press and hold it, then choose **Save to
