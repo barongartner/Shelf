@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { fileURLToPath } = require('url');
 const { execFileSync } = require('child_process');
 const QRCode = require('qrcode');
 const { Shelf } = require('../core/shelf');
@@ -689,27 +690,37 @@ async function saveToDownloads(id) {
   take(id);
 }
 
+// The clipboard module speaks MIME types (Electron 44 and later, modelled on
+// the W3C clipboard): files copied in Explorer or the Finder arrive as a
+// text/uri-list of file: URLs, an image as image/png, text as text/plain.
 async function paste() {
-  const formats = clipboard.availableFormats();
-  if (isMac) {
-    const url = clipboard.read('public.file-url');
-    if (url && url.startsWith('file://')) return addPaths([decodeURIComponent(new URL(url).pathname)]);
-  } else {
-    const raw = clipboard.readBuffer('FileNameW');
-    if (raw && raw.length) {
-      const p = raw.toString('ucs2').replace(/\u0000+$/, '');
-      if (p) return addPaths([p]);
+  const items = await clipboard.read();
+  const grab = async (type) => {
+    const it = items.find((i) => i.types.includes(type));
+    if (!it) return null;
+    const v = await it.getType(type);
+    return typeof v === 'string' ? Buffer.from(v, 'utf8') : Buffer.from(await v.arrayBuffer());
+  };
+  const urls = (await grab('text/uri-list')) || (isMac ? await grab('electron application/osclipboard;format="public.file-url"') : null);
+  if (urls) {
+    const paths = [];
+    for (const line of urls.toString('utf8').split(/\r?\n/)) {
+      const u = line.trim();
+      if (!u || u.startsWith('#') || !u.startsWith('file:')) continue;
+      try {
+        paths.push(fileURLToPath(u));
+      } catch {}
     }
+    if (paths.length) return addPaths(paths);
   }
-  if (formats.some((f) => f.startsWith('image/'))) {
-    const img = clipboard.readImage();
-    if (!img.isEmpty()) {
-      const stamp = new Date().toISOString().slice(0, 19).replace('T', ' at ').replace(/:/g, '.');
-      return shelf.addBuffer(`Pasted image ${stamp}.png`, img.toPNG());
-    }
+  const png = await grab('image/png');
+  if (png && png.length) {
+    const stamp = new Date().toISOString().slice(0, 19).replace('T', ' at ').replace(/:/g, '.');
+    return shelf.addBuffer(`Pasted image ${stamp}.png`, png);
   }
-  const text = clipboard.readText();
-  if (text && text.trim()) shelf.addText(text);
+  const text = await clipboard.readText();
+  if (text && text.trim()) return shelf.addText(text);
+  flash('Nothing to paste: copy a file, an image or some text first');
 }
 
 // Starts a native drag of an item's file. On macOS the drag is of an APFS
@@ -846,10 +857,10 @@ function ipc() {
     if (p && isMac) win.previewFile(p);
   });
   handle('save', (id) => saveToDownloads(idOf(id)));
-  handle('copy-text', (id) => {
+  handle('copy-text', async (id) => {
     const it = shelf.items.get(idOf(id));
     if (it && it.kind === 'text') {
-      clipboard.writeText(it.text);
+      await clipboard.writeText(it.text);
       take(id);
     }
   });
@@ -893,7 +904,7 @@ function ipc() {
   handle('phone-copy-url', () => {
     const url = phoneUrl(true);
     if (!url) throw new Error('No network address yet');
-    clipboard.writeText(url);
+    return clipboard.writeText(url);
   });
   handle('phone-open', () => {
     const url = phoneUrl(true);
@@ -917,7 +928,7 @@ function itemMenu(id) {
   };
   const template = [];
   if (it.kind === 'text') {
-    template.push({ label: 'Copy Text', click: () => { clipboard.writeText(it.text); take(id); } });
+    template.push({ label: 'Copy Text', click: () => clipboard.writeText(it.text).then(() => take(id), () => flash('Could not copy the text')) });
   } else {
     template.push({ label: 'Open', enabled: ready, click: withPath((p) => shell.openPath(p)) });
     if (isMac) template.push({ label: 'Quick Look', enabled: ready, click: withPath((p) => win.previewFile(p)) });
