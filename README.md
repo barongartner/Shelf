@@ -1,3 +1,5 @@
+<p align="center"><img src="media/Banner.png" alt="Shelf" width="880"></p>
+
 # Shelf
 
 A file shelf shared by your computers and your phone. Drop a file on the shelf on one
@@ -9,6 +11,8 @@ little while, then clears itself.
 Works on macOS and Windows, with any phone or browser as a third device. Files go straight
 from one device to the other over your local network. There's no account, no server in the
 cloud, and nothing leaves your network.
+
+<p align="center"><img src="media/Hero.png" alt="The shelf on a Windows PC next to the same shelf on an iPhone" width="880"></p>
 
 ## Download
 
@@ -55,6 +59,8 @@ pointing at it, until you drag it somewhere else (Settings has a button to dock 
   the computer serving the page; the phone's Settings shows that computer's time).
 - **Remove:** click the x on an item. It's removed from every computer and phone.
 
+<p align="center"><img src="media/Desktop.png" alt="The shelf popup in light and dark mode, docked above its tray icon" width="880"></p>
+
 Keyboard: Up/Down to select, Space for Quick Look (Mac), Enter to open, Delete to remove, Esc
 to hide.
 
@@ -94,6 +100,8 @@ One photo works the same from the viewer's **Save to Photos** button. Other file
 folders download to the Files app with the **Download** button; a folder or a multi-select
 download arrives as a .zip.
 
+<p align="center"><img src="media/Batch%20Save.png" alt="Select photos, tap Save, tap Save 4 Images, and they are in the camera roll" width="880"></p>
+
 To send things the other way, use **Photos** and **Files** at the bottom of the page, or
 paste text into the page. Items from the phone show up on every computer with the phone's
 name on them.
@@ -107,6 +115,8 @@ your photos still selected, so one more tap saves them. From then on it opens on
 address by itself. This is once per computer. A Home Screen icon made on the plain address
 stays there, so add it again after the setup. Until the setup is done, a single photo can
 still be saved by pressing and holding it.
+
+<p align="center"><img src="media/Setup.png" alt="The one-time setup sheet on the phone, with the four steps" width="880"></p>
 
 ### Connecting your computers
 
@@ -141,6 +151,8 @@ an address; the code only helps together with the other computer's address.
 - Move the shelf back next to its icon
 
 ## How it works
+
+<p align="center"><img src="media/How%20It%20Moves.png" alt="A Windows PC, the shelf, and a Mac and iPhone, connected over Wi-Fi" width="880"></p>
 
 Each computer runs a small server on port 47474 (plus 47475 for the secure address) and
 announces itself on the network with Bonjour/mDNS (`_shelf._tcp`). Computers on the same

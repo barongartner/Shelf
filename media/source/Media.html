@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Shelf Media</title>
+<!-- Every README image is a board on this page. Render each board to PNG at
+     2x with media/source/render.js. The screens inside are real screenshots
+     of Shelf taken with demo content, not drawings. -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --ink: #0a0f24;
+    --navy: #0d1435;
+    --blue: #3a63e8;
+    --blue-hi: #5b82ff;
+    --blue-lo: #2f4fd6;
+    --sky: #c9d4ff;
+    --plank-hi: #e7b876;
+    --plank-lo: #b07a38;
+    --gold: #ffcf5c;
+    --paper: #f4f4f6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #222; font-family: Inter, system-ui, sans-serif; color: #fff; padding: 40px; display: grid; gap: 40px; justify-content: start; -webkit-font-smoothing: antialiased; }
+  .board { position: relative; overflow: hidden; }
+
+  /* ---- shared backdrop: night-blue room with a lamp glow ---- */
+  .night {
+    background:
+      radial-gradient(60% 70% at 72% 38%, #4f74ff55 0%, transparent 70%),
+      radial-gradient(40% 50% at 12% 10%, #7c5cff2e 0%, transparent 70%),
+      radial-gradient(50% 40% at 50% 120%, #e7b87633 0%, transparent 70%),
+      linear-gradient(160deg, #111a46 0%, #0b1131 55%, #070b20 100%);
+  }
+  .night::after {
+    /* fine grain so the gradient never bands */
+    content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .18; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+  .light-room {
+    background:
+      radial-gradient(60% 60% at 70% 30%, #dfe6ff 0%, transparent 70%),
+      radial-gradient(50% 50% at 10% 90%, #fbe9cf 0%, transparent 70%),
+      linear-gradient(180deg, #f7f8fc 0%, #eef1f8 100%);
+    color: var(--ink);
+  }
+
+  /* ---- the shelf plank the devices stand on ---- */
+  .plank {
+    position: absolute; height: 18px; border-radius: 7px;
+    background: linear-gradient(180deg, var(--plank-hi) 0%, #d6a35e 45%, var(--plank-lo) 100%);
+    box-shadow: 0 1px 0 #ffffff55 inset, 0 -2px 0 #00000026 inset, 0 24px 40px -10px #000000aa;
+  }
+  .plank::before {
+    /* wood grain */
+    content: ''; position: absolute; inset: 3px 10px; border-radius: 4px; opacity: .35;
+    background: repeating-linear-gradient(90deg, transparent 0 38px, #8a5a2433 38px 40px, transparent 40px 95px, #8a5a2422 95px 96px);
+  }
+  .leg { position: absolute; width: 14px; height: 40px; border-radius: 0 0 5px 5px; background: linear-gradient(90deg, #9c6a2e, #b07a38 40%, #8d5d26); }
+
+  /* ---- phone frame (generic, no brand marks) ----
+     The screen is a 393 x 852 page plus a 54 px status bar, so a real
+     screenshot fills it exactly under the bar. */
+  .phone {
+    position: absolute; aspect-ratio: 1 / 2.2375; border-radius: 16.5% / 7.4%;
+    background: linear-gradient(145deg, #3a3d48, #15161b 40%, #2a2c33);
+    box-shadow: 0 0 0 1px #ffffff1a inset, 0 0 0 1.5px #00000080, 0 40px 80px -20px #000000cc, 0 18px 30px -12px #00000099;
+  }
+  .phone .screen { position: absolute; inset: 1.162% 2.6%; border-radius: 14% / 6.1%; overflow: hidden; background: var(--paper); container-type: inline-size; }
+  .phone .screen > img.shot { position: absolute; left: 0; width: 100%; top: 5.96%; }
+  .phone .status { position: absolute; inset: 0 0 auto 0; height: 5.96%; display: flex; align-items: center; justify-content: space-between; padding: 0 8% 0 12%; font-weight: 700; font-size: 4.3cqw; color: #000; background: var(--paper); z-index: 2; }
+  .phone .island { position: absolute; top: 1.25%; left: 50%; transform: translateX(-50%); width: 32%; height: 3.6%; border-radius: 99px; background: #000; z-index: 3; }
+  .status .glyphs { display: flex; gap: .35em; align-items: center; }
+  .status .bars { display: flex; gap: 1.5px; align-items: flex-end; height: .7em; }
+  .status .bars i { display: block; width: 3px; background: currentColor; border-radius: 1px; }
+  .status .batt { width: 1.55em; height: .72em; border: 1.5px solid currentColor; border-radius: 3px; opacity: .9; position: relative; padding: 1px; }
+  .status .batt::before { content: ''; display: block; height: 100%; width: 78%; background: currentColor; border-radius: 1px; }
+
+  /* ---- desktop popup screenshots carry their own shadow and caret ---- */
+  .popup { position: absolute; filter: drop-shadow(0 30px 50px #00000080); }
+
+  /* ---- type ---- */
+  .wordmark { font-weight: 900; letter-spacing: -0.045em; line-height: .9; }
+  .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--sky); opacity: .85; }
+  .lede { color: #c9d1f2; font-weight: 500; line-height: 1.45; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 99px; font-size: 12px; font-weight: 600; background: #ffffff12; border: 1px solid #ffffff1f; color: #e6ebff; backdrop-filter: blur(6px); }
+  .chip svg { width: 13px; height: 13px; }
+  .appicon { border-radius: 22.5%; box-shadow: 0 12px 30px -8px #3a63e8aa, 0 0 0 1px #ffffff22 inset; display: block; }
+
+  /* ---- step labels ---- */
+  .step { position: absolute; display: flex; gap: 10px; align-items: flex-start; }
+  .step b { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; background: var(--blue); color: #fff; box-shadow: 0 4px 12px #3a63e880; }
+  .step span { font-size: 14px; font-weight: 600; line-height: 1.35; }
+  .step small { display: block; font-size: 12px; font-weight: 500; opacity: .7; margin-top: 2px; }
+
+  /* ---- generic share sheet (drawn, not a screenshot) ---- */
+  .sheetmock { position: absolute; inset: auto 0 0 0; background: #f2f2f7; border-radius: 22px 22px 0 0; padding: 14px 14px 26px; color: #000; box-shadow: 0 -10px 30px #00000040; }
+  .sheetmock .head { display: flex; gap: 10px; align-items: center; padding: 2px 4px 12px; border-bottom: 1px solid #0000001a; }
+  .sheetmock .stack { position: relative; width: 38px; height: 38px; }
+  .sheetmock .stack img { position: absolute; width: 32px; height: 32px; object-fit: cover; border-radius: 6px; border: 2px solid #fff; box-shadow: 0 2px 6px #0003; }
+  .sheetmock .stack img:nth-child(1) { left: 0; top: 4px; transform: rotate(-8deg); }
+  .sheetmock .stack img:nth-child(2) { left: 5px; top: 2px; transform: rotate(4deg); }
+  .sheetmock .stack img:nth-child(3) { left: 8px; top: 0; }
+  .sheetmock .t1 { font-size: 12px; font-weight: 600; }
+  .sheetmock .t2 { font-size: 10px; color: #6c6c72; }
+  .sheetmock .apps { display: flex; gap: 12px; padding: 12px 4px; }
+  .sheetmock .apps i { width: 42px; height: 42px; border-radius: 11px; display: block; }
+  .sheetmock .rows { background: #fff; border-radius: 11px; overflow: hidden; }
+  .sheetmock .row { display: flex; justify-content: space-between; align-items: center; padding: 11px 12px; font-size: 12.5px; border-bottom: 1px solid #0000000f; }
+  .sheetmock .row:last-child { border-bottom: 0; }
+  .sheetmock .row.hit { background: #e7ecff; font-weight: 700; color: var(--blue); }
+  .sheetmock .row svg { width: 15px; height: 15px; }
+  .tap { position: absolute; width: 30px; height: 30px; border-radius: 50%; background: transparent; border: 2.5px solid #ffffffee; box-shadow: 0 0 0 7px #3a63e833, 0 4px 14px #0005; }
+
+  /* ---- generic camera roll (drawn) ---- */
+  .roll { position: absolute; inset: 0; background: #fff; }
+  .roll .bar { height: 11%; display: flex; align-items: flex-end; justify-content: space-between; padding: 0 12px 8px; color: #000; }
+  .roll .bar b { font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
+  .roll .bar span { font-size: 11px; color: #6c6c72; font-weight: 600; }
+  .roll .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; }
+  .roll .grid div { aspect-ratio: 1; background-size: cover; background-position: center; position: relative; }
+  .roll .grid div.new::after { content: ''; position: absolute; inset: 0; box-shadow: 0 0 0 2px var(--blue) inset; }
+  .roll .toast { position: absolute; left: 50%; bottom: 7%; transform: translateX(-50%); white-space: nowrap; background: #1d1d22; color: #fff; font-size: 12px; font-weight: 600; padding: 9px 14px; border-radius: 99px; display: flex; gap: 7px; align-items: center; box-shadow: 0 8px 20px #0005; }
+  .roll .toast svg { width: 14px; height: 14px; }
+
+  /* ---- arrows between steps ---- */
+  .arrow { position: absolute; height: 2px; background: linear-gradient(90deg, #5b82ff00, #5b82ff); }
+  .arrow::after { content: ''; position: absolute; right: -1px; top: -5px; border: 6px solid transparent; border-left: 9px solid #5b82ff; border-right: 0; }
+
+  /* ---- network diagram ---- */
+  .node { position: absolute; display: grid; justify-items: center; gap: 10px; text-align: center; }
+  .node .card { display: grid; place-items: center; border-radius: 22px; background: #ffffff0f; border: 1px solid #ffffff22; box-shadow: 0 20px 40px -14px #000a; }
+  .node .label { font-weight: 700; font-size: 15px; }
+  .node .sub { font-size: 12px; color: #aab4e0; font-weight: 500; margin-top: -6px; }
+  .wire { position: absolute; height: 0; border-top: 2px dashed #8ea6ff99; }
+  .packet { position: absolute; width: 30px; height: 30px; border-radius: 8px; background-size: cover; background-position: center; border: 2px solid #fff; box-shadow: 0 6px 14px #0008; }
+</style>
+</head>
+<body>
+
+<!-- ============ 1. Banner: top of the README, 880 x 200 ============ -->
+<section class="board night" id="banner" style="width:880px;height:200px">
+  <div style="position:absolute;left:44px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:22px;z-index:2">
+    <img class="appicon" src="shots/Icon.svg" style="width:96px;height:96px" />
+    <div>
+      <div class="wordmark" style="font-size:72px">Shelf</div>
+      <div class="lede" style="font-size:16px;margin-top:10px">A file shelf shared by your computers and your phone.</div>
+    </div>
+  </div>
+  <!-- a little row of things resting on a plank, right side -->
+  <div style="position:absolute;right:40px;bottom:52px;width:300px;height:110px;z-index:2;transform:scale(.78);transform-origin:right bottom">
+    <div style="position:absolute;left:18px;bottom:16px;width:70px;height:88px;border-radius:9px;background:url('shots/Photo 1.jpg') center/cover;transform:rotate(-6deg);box-shadow:0 10px 20px #0008;border:3px solid #fff"></div>
+    <div style="position:absolute;left:92px;bottom:16px;width:84px;height:66px;border-radius:9px;background:url('shots/Photo 3.jpg') center/cover;box-shadow:0 10px 20px #0008;border:3px solid #fff"></div>
+    <div style="position:absolute;left:186px;bottom:16px;width:52px;height:64px;border-radius:7px;background:#fff;box-shadow:0 10px 20px #0008;padding:9px 8px">
+      <div style="height:5px;width:70%;background:#c9d4ff;border-radius:3px;margin-bottom:6px"></div>
+      <div style="height:5px;width:90%;background:#e3e8fb;border-radius:3px;margin-bottom:6px"></div>
+      <div style="height:5px;width:55%;background:#e3e8fb;border-radius:3px"></div>
+    </div>
+    <div style="position:absolute;left:246px;bottom:16px;width:46px;height:46px;border-radius:9px;background:linear-gradient(180deg,var(--gold) 0 46%,#f2b53a 46% 58%,var(--gold) 58%);box-shadow:0 10px 20px #0008"></div>
+    <div class="plank" style="left:0;right:0;bottom:0"></div>
+    <div class="leg" style="left:26px;bottom:-40px"></div>
+    <div class="leg" style="right:26px;bottom:-40px"></div>
+  </div>
+</section>
+
+<!-- ============ 2. Hero: 880 x 520 ============ -->
+<section class="board night" id="hero" style="width:880px;height:520px">
+  <div style="position:absolute;left:48px;top:64px;width:340px;z-index:2">
+    <div class="eyebrow">Windows · macOS · iPhone</div>
+    <h1 class="wordmark" style="font-size:52px;margin-top:14px;line-height:1">Drop it here.<br/><span style="color:var(--blue-hi)">Grab it there.</span></h1>
+    <p class="lede" style="font-size:15.5px;margin-top:18px">Drop a file on the shelf on one computer and it's on every computer on your Wi-Fi. Open it on your phone and save a whole batch of photos to your camera roll in one tap.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:22px">
+      <span class="chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 8.5 6 12l8-8"/></svg>No cloud</span>
+      <span class="chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 8.5 6 12l8-8"/></svg>No account</span>
+      <span class="chip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 8.5 6 12l8-8"/></svg>Free</span>
+    </div>
+  </div>
+  <!-- desktop popup and phone standing on the shelf -->
+  <img class="popup" src="shots/Desktop Dark.png" style="left:414px;top:32px;width:282px" />
+  <div class="phone" style="left:652px;top:46px;width:178px;z-index:2">
+    <div class="screen"><div class="island"></div><div class="status"><span>9:41</span><span class="glyphs"><span class="bars"><i style="height:35%"></i><i style="height:55%"></i><i style="height:75%"></i><i style="height:100%"></i></span><span class="batt"></span></span></div><img class="shot" src="shots/Phone Grid.jpg" /></div>
+  </div>
+  <div class="plank" style="left:400px;right:28px;bottom:58px;z-index:3"></div>
+  <div class="leg" style="left:440px;bottom:18px;z-index:2"></div>
+  <div class="leg" style="right:70px;bottom:18px;z-index:2"></div>
+</section>
+
+<!-- ============ 3. Social preview: 640 x 320 (1280 x 640 rendered) ============ -->
+<section class="board night" id="social" style="width:640px;height:320px">
+  <div style="position:absolute;left:36px;top:50%;transform:translateY(-54%);width:290px;z-index:2">
+    <div style="display:flex;align-items:center;gap:14px">
+      <img class="appicon" src="shots/Icon.svg" style="width:58px;height:58px" />
+      <div class="wordmark" style="font-size:52px">Shelf</div>
+    </div>
+    <p class="lede" style="font-size:14.5px;margin-top:16px">Files between your computers and your phone, over your own Wi-Fi. Batch save photos to your camera roll in one tap.</p>
+    <div class="eyebrow" style="margin-top:16px">Windows · macOS · iPhone</div>
+  </div>
+  <img class="popup" src="shots/Desktop Light.png" style="left:338px;top:25px;width:170px" />
+  <div class="phone" style="left:498px;top:27px;width:110px;z-index:2">
+    <div class="screen"><div class="island"></div><div class="status"><span>9:41</span><span></span></div><img class="shot" src="shots/Phone Select.jpg" /></div>
+  </div>
+  <div class="plank" style="left:320px;right:16px;bottom:34px;height:13px;z-index:3"></div>
+</section>
+
+<!-- ============ 4. Batch save: 880 x 560 ============ -->
+<section class="board light-room" id="batch" style="width:880px;height:610px">
+  <div style="position:absolute;left:0;right:0;top:34px;text-align:center">
+    <div class="eyebrow" style="color:var(--blue);opacity:1">New in 1.2</div>
+    <h2 class="wordmark" style="font-size:34px;margin-top:8px;letter-spacing:-.035em">Save a whole batch to your camera roll</h2>
+    <p style="font-size:14px;color:#5a5f78;margin-top:8px;font-weight:500">No zip, no Files app, no pressing and holding one photo at a time.</p>
+  </div>
+
+  <!-- 1: select -->
+  <div class="phone" style="left:70px;top:140px;width:176px">
+    <div class="screen"><div class="island"></div><div class="status"><span>9:41</span><span class="glyphs"><span class="batt"></span></span></div><img class="shot" src="shots/Phone Select.jpg" /></div>
+  </div>
+
+  <!-- 2: share sheet -->
+  <div class="phone" style="left:352px;top:140px;width:176px">
+    <div class="screen"><div class="island"></div><div class="status"><span>9:41</span><span class="glyphs"><span class="batt"></span></span></div>
+      <img class="shot" src="shots/Phone Select.jpg" style="filter:brightness(.62)" />
+      <div class="sheetmock" style="padding:10px 9px 18px;border-radius:16px 16px 0 0">
+        <div class="head" style="padding:0 3px 8px">
+          <div class="stack" style="width:30px;height:30px"><img src="shots/Photo 1.jpg" style="width:24px;height:24px"/><img src="shots/Photo 2.jpg" style="width:24px;height:24px"/><img src="shots/Photo 4.jpg" style="width:24px;height:24px"/></div>
+          <div><div class="t1" style="font-size:9px">4 Photos</div><div class="t2" style="font-size:7.5px">Options &rsaquo;</div></div>
+        </div>
+        <div class="apps" style="gap:8px;padding:9px 3px">
+          <i style="width:28px;height:28px;border-radius:8px;background:linear-gradient(#6fd36f,#2fa45a)"></i>
+          <i style="width:28px;height:28px;border-radius:8px;background:linear-gradient(#7fb2ff,#3a63e8)"></i>
+          <i style="width:28px;height:28px;border-radius:8px;background:linear-gradient(#ffd479,#f2a33a)"></i>
+          <i style="width:28px;height:28px;border-radius:8px;background:linear-gradient(#d0d0d8,#a5a5b0)"></i>
+        </div>
+        <div class="rows" style="border-radius:8px">
+          <div class="row" style="padding:7px 8px;font-size:8.5px">Copy</div>
+          <div class="row hit" style="padding:7px 8px;font-size:8.5px">Save 4 Images<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2v8m-3.5-3.5L8 10l3.5-3.5M3 13h10"/></svg></div>
+          <div class="row" style="padding:7px 8px;font-size:8.5px">Save to Files</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="tap" style="left:484px;top:456px"></div>
+
+  <!-- 3: camera roll -->
+  <div class="phone" style="left:634px;top:140px;width:176px">
+    <div class="screen"><div class="island"></div><div class="status" style="background:#fff"><span>9:41</span><span class="glyphs"><span class="batt"></span></span></div>
+      <div class="roll" style="top:6.3%">
+        <div class="bar" style="height:auto;padding:8px 9px 8px;white-space:nowrap;align-items:baseline"><b style="font-size:14px">Camera Roll</b><span style="font-size:8px;margin-left:auto">Just now</span></div>
+        <div class="grid">
+          <div style="background-image:url('shots/Photo 7.jpg')"></div>
+          <div style="background-image:url('shots/Photo 8.jpg')"></div>
+          <div style="background-image:url('shots/Photo 9.jpg')"></div>
+          <div style="background-image:url('shots/Photo 10.jpg')"></div>
+          <div style="background-image:url('shots/Photo 11.jpg')"></div>
+          <div class="new" style="background-image:url('shots/Photo 1.jpg')"></div>
+          <div class="new" style="background-image:url('shots/Photo 2.jpg')"></div>
+          <div class="new" style="background-image:url('shots/Photo 3.jpg')"></div>
+          <div class="new" style="background-image:url('shots/Photo 4.jpg')"></div>
+        </div>
+        <div class="toast" style="font-size:8.5px;padding:6px 10px"><svg viewBox="0 0 16 16" fill="none" stroke="#6fd36f" stroke-width="2.2"><path d="M2.5 8.5 6 12l7.5-8"/></svg>4 photos saved</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow" style="left:262px;top:336px;width:74px"></div>
+  <div class="arrow" style="left:544px;top:336px;width:74px"></div>
+
+  <div class="step" style="left:70px;top:560px;width:200px;color:var(--ink)"><b>1</b><span>Select photos, tap Save</span></div>
+  <div class="step" style="left:352px;top:560px;width:200px;color:var(--ink)"><b>2</b><span>Tap Save 4 Images</span></div>
+  <div class="step" style="left:634px;top:560px;width:200px;color:var(--ink)"><b>3</b><span>All in your camera roll</span></div>
+</section>
+
+<!-- ============ 5. One-time setup: 880 x 500 ============ -->
+<section class="board night" id="setup" style="width:880px;height:500px">
+  <div class="phone" style="left:76px;top:30px;width:196px">
+    <div class="screen"><div class="island"></div><div class="status" style="background:#919195"><span>9:41</span><span class="glyphs"><span class="batt"></span></span></div><img class="shot" src="shots/Phone Setup.jpg" /></div>
+  </div>
+  <div style="position:absolute;left:340px;top:58px;width:480px">
+    <div class="eyebrow">Once per computer, about a minute</div>
+    <h2 class="wordmark" style="font-size:34px;margin-top:10px;letter-spacing:-.035em;line-height:1.05">iPhone only saves a batch<br/>from a secure page.</h2>
+    <p class="lede" style="font-size:14.5px;margin-top:14px">Shelf makes its own certificate, so nothing leaves your network. The first time you tap Save, the page walks you through trusting it:</p>
+    <div style="position:relative;height:210px;margin-top:22px">
+      <div class="step" style="left:0;top:0;width:470px"><b>1</b><span>Download the certificate<small>Right from the sheet. Tap Allow.</small></span></div>
+      <div class="step" style="left:0;top:52px;width:470px"><b>2</b><span>Install it in Settings<small>Profile Downloaded, near the top, then Install.</small></span></div>
+      <div class="step" style="left:0;top:104px;width:470px"><b>3</b><span>Turn on full trust<small>General, About, Certificate Trust Settings, turn on Shelf.</small></span></div>
+      <div class="step" style="left:0;top:156px;width:470px"><b>4</b><span>Tap "I trusted it, save now"<small>Your photos are still selected. One more tap and they're saved.</small></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 6. Desktop, light and dark: 880 x 500 ============ -->
+<section class="board" id="desktop" style="width:880px;height:500px;background:radial-gradient(50% 60% at 25% 40%,#ffffff 0%,transparent 70%) 0 0/50% 100% no-repeat,radial-gradient(50% 60% at 75% 40%,#2a3a8a 0%,transparent 70%) 100% 0/50% 100% no-repeat,linear-gradient(90deg,#e6eaf6 0 50%,#0b1131 50% 100%)">
+  <img class="popup" src="shots/Desktop Light.png" style="left:92px;top:34px;width:286px" />
+  <img class="popup" src="shots/Desktop Dark.png" style="left:502px;top:34px;width:286px" />
+  <div style="position:absolute;left:0;right:0;bottom:0;height:34px;background:#f6f7fb;border-top:1px solid #00000014;clip-path:polygon(0 0, 50% 0, 50% 100%, 0 100%)"></div>
+  <div style="position:absolute;left:0;right:0;bottom:0;height:34px;background:#1b2045d9;border-top:1px solid #ffffff12;clip-path:polygon(50% 0, 100% 0, 100% 100%, 50% 100%)"></div>
+  <img src="shots/Icon.svg" style="position:absolute;left:224px;bottom:7px;width:20px;height:20px;border-radius:5px" />
+  <img src="shots/Icon.svg" style="position:absolute;left:634px;bottom:7px;width:20px;height:20px;border-radius:5px" />
+</section>
+
+<!-- ============ 7. How it moves: 880 x 400 ============ -->
+<section class="board night" id="network" style="width:880px;height:420px">
+  <div style="position:absolute;left:0;right:0;top:34px;text-align:center">
+    <div class="eyebrow">How it moves</div>
+    <h2 class="wordmark" style="font-size:30px;margin-top:8px;letter-spacing:-.03em">Straight across your Wi-Fi. Nothing in between.</h2>
+  </div>
+  <div class="wire" style="left:190px;top:236px;width:224px"></div>
+  <div class="wire" style="left:466px;top:236px;width:224px"></div>
+  <div class="packet" style="left:268px;top:221px;background-image:url('shots/Photo 3.jpg')"></div>
+  <div class="packet" style="left:340px;top:221px;background:#fff;display:grid;place-items:center;font-size:9px;font-weight:800;color:var(--blue)">PDF</div>
+  <div class="packet" style="left:548px;top:221px;background-image:url('shots/Photo 1.jpg')"></div>
+  <div class="packet" style="left:610px;top:221px;background-image:url('shots/Photo 4.jpg')"></div>
+
+  <div class="node" style="left:70px;top:150px;width:150px">
+    <div class="card" style="width:120px;height:120px">
+      <svg viewBox="0 0 48 48" width="56" height="56" fill="none" stroke="#c9d4ff" stroke-width="2.4" stroke-linejoin="round"><rect x="5" y="9" width="38" height="25" rx="3"/><path d="M18 40h12M24 34v6"/></svg>
+    </div>
+    <div class="label">Windows PC</div><div class="sub">Tray app</div>
+  </div>
+  <div class="node" style="left:365px;top:150px;width:150px">
+    <div class="card" style="width:120px;height:120px;background:linear-gradient(160deg,#5b82ff33,#2f4fd622);border-color:#5b82ff66">
+      <img class="appicon" src="shots/Icon.svg" style="width:64px;height:64px" />
+    </div>
+    <div class="label">One shelf</div><div class="sub">Same items everywhere</div>
+  </div>
+  <div class="node" style="left:660px;top:150px;width:150px">
+    <div class="card" style="width:120px;height:120px">
+      <svg viewBox="0 0 48 48" width="56" height="56" fill="none" stroke="#c9d4ff" stroke-width="2.4" stroke-linejoin="round"><rect x="6" y="10" width="36" height="23" rx="3"/><path d="M2 37h44l-3 3H5z"/><rect x="33" y="17" width="11" height="20" rx="2" fill="#0b1131"/></svg>
+    </div>
+    <div class="label">Mac + iPhone</div><div class="sub">Menu bar app + phone</div>
+  </div>
+  <div style="position:absolute;left:0;right:0;bottom:30px;display:flex;justify-content:center;gap:10px">
+    <span class="chip">Found automatically on your network</span>
+    <span class="chip">Every request signed</span>
+    <span class="chip">Folders, photos, text, anything</span>
+  </div>
+</section>
+
+</body>
+</html>
