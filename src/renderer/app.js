@@ -9,6 +9,8 @@ let state = null;
 let selected = null;
 let view = 'shelf'; // shelf | settings | phone
 let internalDrag = null; // id of a text item being dragged from the shelf
+let droppedOnSelf = false; // that drag ended back on the shelf
+const joining = new Set(); // nearby ids we are asking to join right now
 const rows = new Map(); // id -> { el, parts }
 const seenIds = new Set();
 let firstRender = true;
@@ -114,18 +116,55 @@ function ext(name) {
 }
 
 let toastTimer = null;
-function toast(msg) {
+// action: { label, keep: id } adds a button that keeps that item.
+function toast(msg, action) {
   const t = $('toast');
-  t.textContent = msg;
+  t.replaceChildren(el('span', 'toast-text', msg));
+  if (action && action.label && action.keep) {
+    const b = el('button', 'toast-act', action.label);
+    b.addEventListener('click', () => {
+      t.hidden = true;
+      run(api.keep(action.keep));
+    });
+    t.appendChild(b);
+  }
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 4000);
+  toastTimer = setTimeout(() => (t.hidden = true), action ? 8000 : 4000);
 }
 
 async function run(promise) {
   const r = await promise;
   if (r && r.ok === false) toast(r.error);
   return r;
+}
+
+function notReady(it) {
+  if (it.state === 'ready') return false;
+  toast(it.error || `${it.name} hasn't finished arriving yet`);
+  return true;
+}
+
+// Opens a file, or copies a text item.
+function openItem(it) {
+  if (it.kind === 'text') {
+    run(api.copyText(it.id));
+    toast('Copied');
+  } else if (!notReady(it)) run(api.open(it.id));
+}
+
+function bareUrl(u) {
+  return String(u || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
+const CLOCK_OFF = 5 * 60 * 1000;
+function clockOff(p) {
+  return p.clockOff != null ? !!p.clockOff : Math.abs(p.clockSkew || 0) > CLOCK_OFF;
+}
+function clockText(p) {
+  const min = Math.max(1, Math.round(Math.abs(p.clockSkew || 0) / 60000));
+  const way = (p.clockSkew || 0) > 0 ? 'ahead' : 'behind';
+  return `${p.name}'s clock is ${min} min ${way}. Turn on automatic time on both computers.`;
 }
 
 // ---- items ----
@@ -135,7 +174,12 @@ function metaFor(it) {
     const pct = it.size ? Math.min(99, Math.floor((it.got / it.size) * 100)) : 0;
     return `Arriving, ${pct}% of ${fmtSize(it.size)}`;
   }
-  if (it.state === 'missing') return `Waiting for ${it.from || 'another computer'}`;
+  if (it.error && it.state !== 'ready') return it.error;
+  if (it.state === 'missing') {
+    if (it.local) return 'The original file is missing: moved, deleted or on an unplugged drive';
+    if (it.fromPhone) return 'Waiting for a computer that has it';
+    return `Waiting for ${it.from || 'another computer'}`;
+  }
   const bits = [];
   if (it.kind === 'text') bits.push('Text');
   else if (it.kind === 'folder') bits.push(`${it.count} item${it.count === 1 ? '' : 's'}, ${fmtSize(it.size)}`);
@@ -159,17 +203,23 @@ function buildRow(it) {
   const actions = el('div', 'actions');
   const keep = el('button', 'act keep', 'Keep');
   keep.title = 'Keep it on the shelf';
+  const retry = el('button', 'act keep', 'Retry');
+  retry.title = 'Try copying it again';
   const primary = el('button', 'act');
   const remove = el('button', 'act');
   remove.title = 'Remove from the shelf';
   remove.appendChild(svg(ICON_X));
-  actions.append(keep, primary, remove);
+  actions.append(retry, keep, primary, remove);
   const progress = el('div', 'progress');
   li.append(thumb, info, actions, progress);
 
   keep.addEventListener('click', (e) => {
     e.stopPropagation();
     run(api.keep(li.dataset.id));
+  });
+  retry.addEventListener('click', (e) => {
+    e.stopPropagation();
+    run(api.retry(li.dataset.id));
   });
   primary.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -187,11 +237,7 @@ function buildRow(it) {
   li.addEventListener('click', () => select(li.dataset.id));
   li.addEventListener('dblclick', () => {
     const cur = current(li.dataset.id);
-    if (!cur) return;
-    if (cur.kind === 'text') {
-      run(api.copyText(cur.id));
-      toast('Copied');
-    } else run(api.open(cur.id));
+    if (cur) openItem(cur);
   });
   li.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -203,6 +249,7 @@ function buildRow(it) {
     if (!cur) return e.preventDefault();
     if (cur.kind === 'text') {
       internalDrag = cur.id;
+      droppedOnSelf = false;
       e.dataTransfer.setData('text/plain', cur.text);
       e.dataTransfer.effectAllowed = 'copy';
       return;
@@ -214,10 +261,12 @@ function buildRow(it) {
   li.addEventListener('dragend', (e) => {
     const id = internalDrag;
     internalDrag = null;
-    if (id && e.dataTransfer.dropEffect !== 'none') api.take(id);
+    // Released back over the shelf is a drag that changed its mind.
+    if (id && !droppedOnSelf && e.dataTransfer.dropEffect !== 'none') api.take(id);
+    droppedOnSelf = false;
   });
 
-  return { el: li, parts: { thumb, name, metaText, leave, keep, primary, progress }, key: {} };
+  return { el: li, parts: { thumb, name, metaText, leave, keep, retry, primary, progress }, key: {} };
 }
 
 function updateRow(row, it) {
@@ -227,6 +276,7 @@ function updateRow(row, it) {
   for (const k of ['file', 'folder', 'text']) li.classList.toggle('kind-' + k, it.kind === k);
   li.classList.toggle('waiting', it.state !== 'ready');
   li.classList.toggle('leaving', !!it.expiresAt);
+  li.classList.toggle('failed', !!it.failed && it.state !== 'ready');
   li.classList.toggle('selected', selected === it.id);
 
   const thumbKey = `${it.icon ? it.icon.length : 0}:${it.kind}:${it.name}`;
@@ -252,6 +302,7 @@ function updateRow(row, it) {
   li.title = it.kind === 'text' ? it.text.slice(0, 600) : it.name;
   parts.metaText.textContent = metaFor(it);
   parts.keep.hidden = !it.expiresAt;
+  parts.retry.hidden = !(it.failed && it.state !== 'ready');
 
   const primaryKey = it.kind === 'text' ? 'copy' : 'save';
   if (key.primary !== primaryKey) {
@@ -336,7 +387,9 @@ function renderFooter() {
   const shown = state.peers.slice(0, 2);
   for (const p of shown) {
     const chip = el('span', 'peer-chip');
-    chip.append(el('span', 'dot' + (p.online ? ' on' : '')), document.createTextNode(p.name));
+    const off = clockOff(p);
+    chip.append(el('span', 'dot' + (off ? ' warn' : p.online ? ' on' : '')), document.createTextNode(p.name));
+    if (off) chip.title = clockText(p);
     box.appendChild(chip);
   }
   if (state.peers.length > shown.length) box.appendChild(el('span', null, `+${state.peers.length - shown.length}`));
@@ -385,7 +438,12 @@ function renderSettings(full) {
   peers.appendChild(me);
   for (const p of state.peers) {
     const li = el('li');
-    li.append(el('span', 'dot' + (p.online ? ' on' : '')), el('span', 'grow', p.name), el('span', 'sub', p.online ? 'connected' : 'offline'));
+    if (clockOff(p)) {
+      li.classList.add('wrap');
+      li.append(el('span', 'dot warn'), el('span', 'grow', p.name), el('span', 'sub', 'clock is off'), el('span', 'peer-note', clockText(p)));
+    } else {
+      li.append(el('span', 'dot' + (p.online ? ' on' : '')), el('span', 'grow', p.name), el('span', 'sub', p.online ? 'connected' : 'offline'));
+    }
     peers.appendChild(li);
   }
 
@@ -394,15 +452,25 @@ function renderSettings(full) {
   $('nearby-block').hidden = state.nearby.length === 0;
   for (const n of state.nearby) {
     const li = el('li');
-    const btn = el('button', 'btn primary small', 'Join');
+    // The list is rebuilt on every state push, so "Asking" lives in joining,
+    // not on the button.
+    const asking = joining.has(n.id);
+    const btn = el('button', 'btn primary small', asking ? 'Asking…' : 'Join');
+    btn.disabled = asking;
     btn.title = `Ask ${n.name} to let this computer join its shelf`;
     btn.addEventListener('click', async () => {
+      if (joining.has(n.id)) return;
+      joining.add(n.id);
       btn.disabled = true;
       btn.textContent = 'Asking…';
-      const r = await run(api.join(n.id));
-      btn.disabled = false;
-      btn.textContent = 'Join';
-      if (r.ok) toast(`Joined ${n.name}'s shelf`);
+      let r;
+      try {
+        r = await run(api.join(n.id));
+      } finally {
+        joining.delete(n.id);
+        if (view === 'settings') renderSettings(false);
+      }
+      if (r && r.ok) toast(`Joined ${n.name}'s shelf`);
     });
     li.append(el('span', 'dot on'), el('span', 'grow', n.name), btn);
     nearby.appendChild(li);
@@ -448,9 +516,9 @@ function renderPhone() {
     ph.hidden = false;
     ph.textContent = p.address ? 'Making the code' : 'No network';
   }
-  $('phone-base').textContent = p.base || '';
+  $('phone-base').textContent = bareUrl(p.base);
   $('phone-stable').hidden = !p.stable;
-  $('phone-stable').textContent = p.stable ? `or ${p.stable.replace(/^https?:\/\//, '').replace(/\/$/, '')}, which stays the same when the address changes` : '';
+  $('phone-stable').textContent = p.stable ? `or ${bareUrl(p.stable)}, which stays the same when the address changes` : '';
   $('phone-pin').textContent = p.pin ? `${p.pin.slice(0, 3)} ${p.pin.slice(3)}` : '';
   renderPairExpiry();
 
@@ -491,7 +559,7 @@ function renderPhone() {
       const r = await api.confirm(`Remove ${d.name} from the shelf?`, 'It will need to scan the code again.');
       if (r.ok && r.value) run(api.deviceRemove(d.id));
     });
-    li.append(el('span', 'dot on'), el('span', 'grow', d.name), el('span', 'sub', `seen ${fmtWhen(d.lastSeen)}`), btn);
+    li.append(el('span', 'dot' + (d.online ? ' on' : '')), el('span', 'grow', d.name), el('span', 'sub', d.online ? 'connected now' : `seen ${fmtWhen(d.lastSeen)}`), btn);
     list.appendChild(li);
   }
 }
@@ -510,7 +578,7 @@ $('btn-join-code').addEventListener('click', async () => {
   const r = await run(api.joinCode($('join-code').value));
   if (r.ok) {
     $('join-code').value = '';
-    toast('Joined. Computers with this code will appear above.');
+    toast('Joined. Computers with this code on the same network will appear above. If one does not, add its IP address below.');
   }
 });
 $('btn-add-ip').addEventListener('click', async () => {
@@ -521,7 +589,7 @@ $('btn-add-ip').addEventListener('click', async () => {
   }
 });
 $('btn-new-shelf').addEventListener('click', async () => {
-  const r = await api.confirm('Start a new, empty shelf?', 'This computer stops sharing with the others until you join again.');
+  const r = await api.confirm('Start a new, empty shelf?', 'This computer stops sharing with the others until you join again. Everything stays on the other computers, and phones connected through this one need to scan again.');
   if (r.ok && r.value) run(api.newShelf());
 });
 $('btn-clear').addEventListener('click', async () => {
@@ -562,13 +630,17 @@ window.addEventListener('dragleave', () => {
 });
 window.addEventListener('dragover', (e) => {
   e.preventDefault();
-  if (!internalDrag) e.dataTransfer.dropEffect = 'copy';
+  // The shelf's own text is never dropped on itself: 'none' tells dragend so.
+  e.dataTransfer.dropEffect = internalDrag ? 'none' : 'copy';
 });
 window.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   overlay.hidden = true;
-  if (internalDrag) return;
+  if (internalDrag) {
+    droppedOnSelf = true;
+    return;
+  }
   if (view !== 'shelf') showView('shelf');
   const paths = [...e.dataTransfer.files].map((f) => api.pathFor(f)).filter(Boolean);
   if (paths.length) return run(api.addPaths(paths));
@@ -607,12 +679,9 @@ document.addEventListener('keydown', (e) => {
   if (!cur) return;
   if (e.key === ' ' && cur.kind !== 'text') {
     e.preventDefault();
-    run(api.quickLook(cur.id));
+    if (!notReady(cur)) run(api.quickLook(cur.id));
   } else if (e.key === 'Enter') {
-    if (cur.kind === 'text') {
-      run(api.copyText(cur.id));
-      toast('Copied');
-    } else run(api.open(cur.id));
+    openItem(cur);
   } else if (e.key === 'Backspace' || e.key === 'Delete') {
     run(api.remove(cur.id));
   } else if (mod && e.key.toLowerCase() === 'c' && cur.kind === 'text') {

@@ -155,3 +155,88 @@ test('file names Windows would reject are cleaned up on the way in', () => {
   assert.strictEqual(safeName('trailing dot.'), 'trailing dot');
   assert.strictEqual(safeName('..'), 'item');
 });
+
+test('starting a new shelf and joining the old one again brings the shelf back, wiping nothing', async (t) => {
+  const code = newCode();
+  const a = await makeNode('PC', code);
+  const b = await makeNode('Mac', code);
+  t.after(async () => {
+    await a.net.stop();
+    await b.net.stop();
+  });
+  assert.strictEqual(await b.net.addAddress('127.0.0.1', a.net.port), 'peer');
+  await until(() => a.net.peerList().some((p) => p.online) && b.net.peerList().some((p) => p.online), 'peers online');
+  const text = b.shelf.addText('shared');
+  const phone = b.shelf.addDevice({ name: 'iPhone', tokenHash: 'e'.repeat(64) });
+  await until(() => a.shelf.items.get(text.id) && a.shelf.items.get(phone.id), 'arrive');
+
+  a.shelf.forgetAll();
+  assert.strictEqual(a.shelf.visible().length, 0);
+  assert.strictEqual(a.shelf.devices().length, 0);
+  assert.ok(![...a.shelf.items.values()].some((it) => it.removed), 'nothing is turned into a removal');
+  a.net.setCode(newCode());
+  await new Promise((r) => setTimeout(r, 300));
+  a.net.setCode(code);
+  await until(() => a.shelf.items.get(text.id) && a.shelf.items.get(phone.id), 'the shelf comes back after joining again');
+  await new Promise((r) => setTimeout(r, 400));
+  assert.ok(!b.shelf.items.get(text.id).removed, 'the item survives on the other computer');
+  assert.ok(b.shelf.devices().some((d) => d.id === phone.id), 'the phone survives on the other computer');
+  assert.ok(!a.shelf.items.get(text.id).removed);
+});
+
+test('a Keep made while the taker was away beats the expiry; a removal stays final', () => {
+  const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'shelf-keep-'));
+  const a = new Shelf({ dataDir: dir(), self: { id: 'aaaa', name: 'A' } });
+  const b = new Shelf({ dataDir: dir(), self: { id: 'bbbb', name: 'B' } });
+  const it = a.addText('stay please');
+  b.merge(a.payload());
+  a.take(it.id, 1);
+  b.merge(a.payload());
+  // A is asleep: B keeps it, A never hears. Then A wakes and expires it.
+  b.keep(it.id);
+  const until = Date.now() + 5;
+  while (Date.now() < until);
+  a.sweep();
+  assert.ok(a.items.get(it.id).removed);
+  assert.strictEqual(a.items.get(it.id).expired, true);
+  b.merge(a.payload());
+  assert.ok(!b.items.get(it.id).removed, 'the Keep is newer than the expiry');
+  a.merge(b.payload());
+  assert.ok(!a.items.get(it.id).removed, 'and brings the item back on the taker');
+  assert.strictEqual(a.items.get(it.id).expiresAt, null);
+
+  // An expiry nobody answered still removes it everywhere.
+  a.take(it.id, 1);
+  b.merge(a.payload());
+  const until2 = Date.now() + 5;
+  while (Date.now() < until2);
+  a.sweep();
+  b.merge(a.payload());
+  assert.ok(b.items.get(it.id).removed);
+
+  // An explicit removal beats any later version.
+  const t2 = a.addText('gone');
+  b.merge(a.payload());
+  a.remove(t2.id);
+  b.keep(t2.id);
+  b._update(b.items.get(t2.id), { name: 'renamed later' });
+  a.merge(b.payload());
+  assert.ok(a.items.get(t2.id).removed);
+  b.merge(a.payload());
+  assert.ok(b.items.get(t2.id).removed);
+});
+
+test('a computer that did not start the countdown waits minutes, not an hour', () => {
+  const { LINGER_GRACE } = require('../src/core/shelf');
+  assert.ok(LINGER_GRACE <= 5 * 60 * 1000);
+  const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'shelf-grace-'));
+  const a = new Shelf({ dataDir: dir(), self: { id: 'aaaa', name: 'A' } });
+  const b = new Shelf({ dataDir: dir(), self: { id: 'bbbb', name: 'B' } });
+  const it = a.addText('taken');
+  a.take(it.id, 1000);
+  b.merge(a.payload());
+  const cur = b.items.get(it.id);
+  b.items.set(it.id, { ...cur, expiresAt: Date.now() - LINGER_GRACE - 1 });
+  b.sweep();
+  assert.ok(b.items.get(it.id).removed, 'gone once the clock slack has passed');
+});

@@ -105,6 +105,9 @@ function loadSettings() {
     bounds: s.layout === 'popup' ? s.bounds || null : null,
     layout: 'popup',
     address: s.address || null,
+    // Computers this one has been on a shelf with, so they can be dialed
+    // again after a restart when discovery is blocked.
+    knownPeers: Array.isArray(s.knownPeers) ? s.knownPeers : [],
   };
 }
 
@@ -135,6 +138,7 @@ async function start() {
     shelf,
     self,
     code: settings.code,
+    known: settings.knownPeers || [],
     onPairRequest: askToPair,
     web: {
       webDir: WEB,
@@ -155,6 +159,11 @@ async function start() {
     }
   });
   net.on('peers', pushState);
+  if (net.web) net.web.onOnline = pushState;
+  net.on('known', (list) => {
+    settings.knownPeers = Array.isArray(list) ? list : [];
+    saveSettings();
+  });
   net.on('addresses', () => {
     qrCache = null;
     pushState();
@@ -526,6 +535,7 @@ function snapshot() {
   const pair = net.web ? net.web.pairInfo() : null;
   // No live code, no QR: a code-less link would pair nobody.
   const url = pair ? phoneUrl(true) : null;
+  const online = new Set(net.web && typeof net.web.onlineDeviceIds === 'function' ? net.web.onlineDeviceIds() : []);
   return {
     self: { id: settings.id, name: settings.name },
     code: net.code,
@@ -543,6 +553,7 @@ function snapshot() {
       const l = shelf.local.get(it.id);
       const state = it.kind === 'text' ? 'ready' : l ? l.state : 'missing';
       if (state === 'ready' && !icons.has(it.id) && l) loadIcon(it, l.path);
+      const by = shelf.items.get(it.addedBy);
       return {
         id: it.id,
         kind: it.kind,
@@ -551,6 +562,11 @@ function snapshot() {
         count: it.kind === 'folder' ? (it.files || []).length : undefined,
         text: it.kind === 'text' ? it.text : undefined,
         from: it.addedBy === settings.id ? null : it.addedByName,
+        fromPhone: !!by && by.kind === 'device',
+        // The file lives where it was dropped on this computer, not in the store.
+        local: !!(l && l.path) && !files.isInside(l.path, shelf.storeDir),
+        error: (l && l.error) || null,
+        failed: !!(l && l.failed),
         addedAt: it.addedAt,
         expiresAt: it.expiresAt,
         state,
@@ -560,7 +576,7 @@ function snapshot() {
     }),
     peers: net.peerList(),
     nearby: net.nearbyList(),
-    devices: shelf.devices().map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen || d.addedAt, addedAt: d.addedAt })),
+    devices: shelf.devices().map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen || d.addedAt, addedAt: d.addedAt, online: online.has(d.id) })),
     phone: {
       url,
       base: phoneUrl(false),
@@ -627,7 +643,17 @@ function lingerMs() {
 
 function take(id) {
   const ms = lingerMs();
-  if (ms) shelf.take(id, ms);
+  if (!ms) return false;
+  const it = shelf.items.get(id);
+  const was = it && it.expiresAt;
+  shelf.take(id, ms);
+  const now = shelf.items.get(id);
+  return !was && !!(now && now.expiresAt);
+}
+
+function lingerText() {
+  const m = settings.lingerMin;
+  return m === 60 ? '1 hour' : m > 60 && m % 60 === 0 ? `${m / 60} hours` : `${m} min`;
 }
 
 // A drop onto the shelf of something that came off the shelf is a drag that
@@ -661,8 +687,9 @@ async function addPaths(paths) {
   if (errors.length) flash(errors.join('\n'));
 }
 
-function flash(msg) {
-  if (win && !win.isDestroyed()) win.webContents.send('flash', msg);
+// action: { label, keep: id } puts a button on the toast.
+function flash(msg, action) {
+  if (win && !win.isDestroyed()) win.webContents.send('flash', msg, action || null);
 }
 
 async function uniquePath(dir, name) {
@@ -742,7 +769,18 @@ function startDrag(sender, id) {
   }
   const icon = icons.get(id) ? nativeImage.createFromDataURL(icons.get(id)).resize({ width: 48 }) : nativeImage.createFromPath(path.join(ASSETS, 'drag.png'));
   sender.startDrag({ file: dragPath, icon });
-  take(id);
+  // Electron does not say whether the drag was dropped or cancelled. On
+  // Windows startDrag returns once it is over, so a release back over the
+  // shelf is not a take. On the Mac it returns at once; a drop back onto the
+  // shelf is caught by addPaths. Either way the toast makes a wrong countdown
+  // one click to undo.
+  let backOnShelf = false;
+  if (!isMac && win && win.isVisible()) {
+    const c = screen.getCursorScreenPoint();
+    const b = win.getBounds();
+    backOnShelf = c.x >= b.x && c.x < b.x + b.width && c.y >= b.y && c.y < b.y + b.height;
+  }
+  if (!backOnShelf && take(id)) flash(`${it.name} leaves the shelf in ${lingerText()}.`, { label: 'Keep', keep: id });
   setTimeout(() => {
     if (!fs.existsSync(p)) shelf.setLocal(id, { state: 'missing' });
   }, 1000);
@@ -844,6 +882,10 @@ function ipc() {
   handle('keep', (id) => shelf.keep(idOf(id)));
   handle('remove', (id) => shelf.remove(idOf(id)));
   handle('clear-all', () => shelf.clearAll());
+  handle('retry', (id) => {
+    if (typeof net.retry !== 'function') throw new Error('Retry is not available in this version');
+    return net.retry(idOf(id));
+  });
   handle('open', async (id) => {
     const p = readyPath(idOf(id));
     if (p) await shell.openPath(p);
@@ -879,9 +921,8 @@ function ipc() {
     setCode(pretty);
   });
   handle('add-ip', async (text) => {
-    const [host, port] = String(text).trim().split(':');
-    if (!host) throw new Error('Type an IP address');
-    return net.addAddress(host, port ? Number(port) : undefined);
+    const { host, port } = parseAddress(text);
+    return net.addAddress(host, port);
   });
   handle('new-shelf', () => {
     // A new shelf starts empty: the old items stay with the computers that
@@ -915,6 +956,19 @@ function ipc() {
   handle('device-rename', (id, name) => shelf.renameDevice(idOf(id), String(name || '')));
 }
 
+// Takes "192.168.1.20", "mac.local:47474", "http://host:port/" or
+// "[::1]:47474". An IPv6 host keeps its brackets, the way it is dialed.
+function parseAddress(text) {
+  const s = String(text || '').trim();
+  if (!s) throw new Error('Type an IP address');
+  let u = null;
+  try {
+    u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : 'http://' + s);
+  } catch {}
+  if (!u || !u.hostname) throw new Error(`"${s.slice(0, 60)}" is not an address. Type something like 192.168.1.20`);
+  return { host: u.hostname, port: u.port ? Number(u.port) : undefined };
+}
+
 function itemMenu(id) {
   const it = shelf.items.get(id);
   if (!it) return Menu.buildFromTemplate([]);
@@ -936,6 +990,8 @@ function itemMenu(id) {
   }
   template.push({ label: 'Save to Downloads', enabled: ready, click: () => saveToDownloads(id) });
   template.push({ type: 'separator' });
+  const l = shelf.local.get(id);
+  if (l && l.failed && typeof net.retry === 'function') template.push({ label: 'Retry', click: () => Promise.resolve(net.retry(id)).catch((err) => flash(err.message)) });
   if (it.expiresAt) template.push({ label: 'Keep on Shelf', click: () => shelf.keep(id) });
   template.push({ label: 'Remove from Shelf', click: () => shelf.remove(id) });
   return Menu.buildFromTemplate(template);

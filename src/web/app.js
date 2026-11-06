@@ -36,6 +36,7 @@ let selecting = false;
 let viewing = null;
 let suppressClick = false;
 let lastPairCheck = 0;
+let pendingSave = null; // ids handed over from the plain address to save here
 const selected = new Set();
 const tiles = new Map(); // id -> { el, parts, key }
 const rows = new Map();
@@ -101,12 +102,12 @@ function ext(name) {
 }
 
 let toastTimer = null;
-function toast(msg) {
+function toast(msg, ms = 3200) {
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 3200);
+  toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
 function auth() {
@@ -230,13 +231,15 @@ async function refreshHandoff() {
 async function pair(body) {
   showBusy('Connecting to your computer');
   try {
-    const r = await fetch('/api/pair', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    // The token goes along when there is one: a phone already on the shelf
+    // stays the same phone instead of becoming a second one.
+    const r = await fetch('/api/pair', { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const json = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(json.error || 'That did not work');
     storeToken(json.token);
     me = { ...json, paired: true, token: undefined };
     if (await moveToBetter(json)) return;
-    toast(`Connected to ${json.computer.name}`);
+    toast(json.already ? `Already connected to ${json.computer.name}` : `Connected to ${json.computer.name}`);
     refreshHandoff();
     enterApp();
   } catch (err) {
@@ -309,8 +312,25 @@ async function boot() {
   // when its storage is empty: a private tab, or the view the system opens
   // to make the Home Screen app.
   const hand = token ? null : q.get('h');
+  // Photos the plain address was asked to save: they come up selected here
+  // on the secure one, one tap from the share sheet.
+  const toSave = (h.get('s') || '').split(',').filter((x) => /^[\w-]{1,64}$/.test(x));
+  if (toSave.length) pendingSave = toSave;
   if (location.search || location.hash) history.replaceState(history.state, '', location.pathname);
-  if (code) return pair({ code });
+  if (code) {
+    // A QR code scanned on a phone that is already connected: ask first. The
+    // code still goes to the computer so it is used up, but the phone stays
+    // the phone it is.
+    let r = null;
+    if (token) {
+      try {
+        r = await fetch('/api/me', { headers: auth(), cache: 'no-store', signal: timeoutSignal(8000) }).then((x) => x.json());
+      } catch {}
+    }
+    if (!(r && r.paired)) return pair({ code });
+    fetch('/api/pair', { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body: JSON.stringify({ code }) }).catch(() => {});
+    toast(`Already connected to ${r.computer.name}`);
+  }
   if (handed) storeToken(handed);
   const cached = loadCache();
   const known = !!(token || cached);
@@ -334,9 +354,10 @@ async function boot() {
     if (await moveToBetter(r)) return;
     setManifestToken();
     refreshHandoff();
-    if (handed) toast(`Connected to ${r.computer.name}`);
+    if (handed && !toSave.length) toast(`Connected to ${r.computer.name}`);
     if ($('app').hidden) return enterApp({ cached });
-    $('computer').textContent = me.computer.name;
+    if (selecting) updateSelbar();
+    else $('computer').textContent = me.computer.name;
     renderSettings();
     return;
   }
@@ -381,17 +402,25 @@ function enterApp({ cached = null } = {}) {
   maybeShowHomeCard();
 }
 
+let offlineSince = 0;
+
 function setOnline(on) {
   const was = online;
   online = on;
+  if (on) {
+    offlineSince = 0;
+    fallbackTo = null;
+    fallbackTried.clear();
+  } else if (!offlineSince) offlineSince = Date.now();
   $('dot').classList.toggle('on', on);
   const b = $('banner');
   b.hidden = on;
   if (!on) {
     const name = me ? me.computer.name : 'your computer';
-    b.textContent = lastSyncAt
+    b.replaceChildren(lastSyncAt
       ? `Looking for ${name}. Showing the shelf as it was at ${fmtWhen(lastSyncAt)}.`
-      : `Looking for ${name}`;
+      : `Looking for ${name}`);
+    if (fallbackTo) b.append(' ', peerLink(fallbackTo));
   }
   if (on && !was) {
     retryImages();
@@ -399,10 +428,76 @@ function setOnline(on) {
   }
 }
 
+// ---- the other computers ----
+
+// A phone on the shelf is let in by every computer on it, so when this one
+// stops answering the page can carry on through another. The token rides in
+// the fragment, the same way the page moves between this computer's own
+// addresses, so the phone stays the phone it is.
+function knownPeers() {
+  return (state && state.peers) || (me && me.peers) || [];
+}
+
+function peerBases(p) {
+  const out = [];
+  for (const h of [p.host, p.addr]) {
+    if (!h || !p.port) continue;
+    out.push(`http://${h.includes(':') ? `[${h}]` : h}:${p.port}/`);
+  }
+  return out;
+}
+
+function peerHref(base) {
+  return `${base}#t=${encodeURIComponent(token || '')}`;
+}
+
+function peerLink(p) {
+  const a = el('a', 'peer-link', `Open through ${p.name}`);
+  a.href = peerHref(peerBases(p)[0]);
+  a.addEventListener('click', async (e) => {
+    // The name on the network can fail where the plain address works.
+    e.preventDefault();
+    const bases = peerBases(p);
+    const ok = await Promise.all(bases.map(reachable));
+    const i = ok.indexOf(true);
+    if (i < 0) return toast(`${p.name} is not answering either.`);
+    location.href = peerHref(bases[i]);
+  });
+  return a;
+}
+
+let fallbackTo = null;
+let fallbackBusy = false;
+const fallbackTried = new Set();
+
+setInterval(async () => {
+  if (online || !offlineSince || !token || fallbackBusy || fallbackTo) return;
+  if (Date.now() - offlineSince < 15000) return;
+  fallbackBusy = true;
+  try {
+    for (const p of knownPeers()) {
+      for (const base of peerBases(p)) {
+        if (fallbackTried.has(base)) continue;
+        fallbackTried.add(base);
+        if (!(await reachable(base)) || online) continue;
+        // A browser tab just moves. The Home Screen app would open the other
+        // address outside itself, so it offers the move instead.
+        if (!standalone) return location.replace(peerHref(base));
+        fallbackTo = p;
+        setOnline(false);
+        return;
+      }
+    }
+  } finally {
+    fallbackBusy = false;
+  }
+}, 5000);
+
 // Thumbnails that failed while the computer was away load again now.
 function retryImages() {
   for (const row of tiles.values()) {
-    if (row.key.src && !row.el.classList.contains('loaded')) row.parts.img.src = `${row.key.src}&r=${Date.now()}`;
+    if (!row.key.src || row.el.classList.contains('loaded')) continue;
+    row.parts.img.src = `${row.key.src}${row.key.src.includes('?') ? '&' : '?'}r=${Date.now()}`;
   }
 }
 
@@ -420,6 +515,7 @@ function connect() {
     try {
       apply(JSON.parse(e.data));
     } catch {}
+    resumeSave();
   });
   es.addEventListener('ping', () => {
     lastBeat = Date.now();
@@ -797,9 +893,9 @@ function updateSelbar() {
   const n = its.length;
   // The count lives in the header while selecting; the bar is for actions.
   $('computer').textContent = n ? `${n} selected` : 'Tap items to select them';
-  const shareable = canShareFiles && n > 0 && its.every((it) => it.kind === 'file' && it.ready);
+  const shareable = n > 0 && its.every((it) => it.kind === 'file' && it.ready) && (canShareFiles || its.every(isMedia));
   const save = $('sel-save');
-  save.hidden = !canShareFiles;
+  save.hidden = false;
   save.disabled = !shareable;
   if (!save.dataset.busy) save.textContent = shareLabel(its);
   $('sel-download').disabled = !its.some((it) => it.kind !== 'text' && it.ready) && !its.some((it) => it.kind === 'text');
@@ -850,6 +946,7 @@ function trimPrepared(keepId) {
 async function shareItems(ids, btn) {
   const its = ids.map(current).filter((it) => it && it.kind === 'file' && it.ready);
   if (!its.length) return toast('Nothing to save');
+  if (!canShareFiles) return saveFromPlain(its, btn);
   // The share sheet holds every file in memory three times over; big
   // batches go to the Files app instead of crashing the tab.
   const total = its.reduce((n, it) => n + (it.size || 0), 0);
@@ -890,6 +987,147 @@ async function shareItems(ids, btn) {
     if (err.name === 'NotAllowedError') toast(`Ready. Tap ${label} again.`);
     else toast(`Couldn't share: ${err.message}`);
   }
+}
+
+// The share sheet, and with it Save to Photos for many at once, only exists
+// on the secure address. From the plain one: move there when this phone
+// trusts the computer's certificate, otherwise say how to trust it, and
+// meanwhile offer the photos one under the other to press and hold.
+function secureAddresses() {
+  const port = me && me.ports && me.ports.https;
+  if (!port) return [];
+  const hosts = [...((me && me.hosts) || []), location.hostname];
+  return [...new Set(hosts.filter(Boolean).map((h) => `https://${h}:${port}/`))];
+}
+
+async function saveFromPlain(its, btn) {
+  saveAsk = its.map((it) => it.id);
+  const urls = secureAddresses();
+  if (urls.length && token) {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.dataset.busy = '1';
+    btn.textContent = 'Checking';
+    const ok = await Promise.all(urls.map(reachable));
+    btn.disabled = false;
+    delete btn.dataset.busy;
+    btn.textContent = label;
+    const i = ok.indexOf(true);
+    if (i >= 0) return goSecure(urls[i], saveAsk);
+  }
+  openSaveSheet();
+}
+
+function goSecure(url, ids) {
+  // The token and the ids ride in the fragment, which never leaves the phone.
+  location.href = `${url}#t=${encodeURIComponent(token)}${ids && ids.length ? `&s=${ids.join(',')}` : ''}`;
+}
+
+let saveAsk = [];
+
+function openSaveSheet() {
+  const its = saveAsk.map(current).filter(Boolean);
+  const photos = its.length && its.every((it) => it.type === 'image');
+  const what = its.length === 1 ? (photos ? 'this photo' : 'this') : photos ? `these ${its.length} photos` : `these ${its.length}`;
+  const hasSecure = secureAddresses().length > 0;
+  $('save-title').textContent = its.length === 1 ? (photos ? 'Save to Photos' : 'Save') : `Save ${its.length} to Photos`;
+  let text;
+  if (!hasSecure) text = 'This computer has no secure address, so saving many at once is not available. Press and hold each photo instead.';
+  else
+    text = `iPhone only lets a page save a batch straight to Photos on a secure address, and this phone does not trust this computer yet. Set it up once (about a minute), and from then on Save puts ${what} in Photos with one tap:`;
+  $('save-text').textContent = text;
+  $('save-steps').hidden = !hasSecure;
+  // Profiles only download from Safari, not from a Home Screen app.
+  $('save-step1').textContent = standalone ? `Open ${location.host} in Safari, open Settings in Shelf, and download the certificate there. Tap ` : '';
+  $('save-switch').hidden = !hasSecure;
+  // Press and hold is fine for one photo, useless for a batch.
+  $('save-hold').hidden = hasSecure && its.length > 1;
+  $('save-hold').textContent = hasSecure ? 'Press and hold instead' : 'Show them to press and hold';
+  $('sheet-save').hidden = false;
+}
+
+$('save-switch').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  btn.textContent = 'Checking';
+  const urls = secureAddresses();
+  const ok = await Promise.all(urls.map(reachable));
+  btn.disabled = false;
+  btn.textContent = 'I trusted it, save now';
+  const i = ok.indexOf(true);
+  if (i >= 0) return goSecure(urls[i], saveAsk);
+  toast('Your phone does not trust the certificate yet. Check step 3.');
+});
+$('save-hold').addEventListener('click', () => {
+  $('sheet-save').hidden = true;
+  openHoldSave(saveAsk);
+});
+$('save-cancel').addEventListener('click', () => ($('sheet-save').hidden = true));
+$('sheet-save').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) $('sheet-save').hidden = true;
+});
+
+// Every photo full size, one under the other: iPhone's press-and-hold menu
+// has Save to Photos on an image even on the plain address. Videos have no
+// such menu, so they download to Files, where Share has Save Video.
+function openHoldSave(ids) {
+  const its = ids.map(current).filter((it) => it && isMedia(it) && it.ready);
+  if (!its.length) return;
+  const list = $('hold-list');
+  list.replaceChildren();
+  for (const it of its) {
+    const fig = el('figure', 'hold-item');
+    if (it.type === 'image') {
+      const img = el('img');
+      img.src = withToken(`/v/${it.id}`);
+      img.alt = it.name;
+      img.addEventListener('contextmenu', () => take(it.id));
+      fig.appendChild(img);
+    } else {
+      const v = el('video');
+      v.controls = true;
+      v.playsInline = true;
+      v.preload = 'metadata';
+      v.src = withToken(`/v/${it.id}`);
+      if (it.thumb) v.poster = withToken(`/t/${it.id}`);
+      const a = el('a', 'pill light', 'Download video');
+      a.href = withToken(`/d/${it.id}`);
+      a.download = it.name;
+      a.addEventListener('click', () => take(it.id));
+      fig.append(v, a);
+    }
+    fig.appendChild(el('figcaption', null, it.name));
+    list.appendChild(fig);
+  }
+  const vids = its.some((it) => it.type === 'video');
+  $('hold-hint').textContent = vids
+    ? 'Press and hold a photo, then tap Save to Photos. Videos download to Files: open one there, tap Share, then Save Video.'
+    : its.length === 1
+      ? 'Press and hold the photo, then tap Save to Photos.'
+      : 'Press and hold each photo, then tap Save to Photos.';
+  $('holdsave').hidden = false;
+  $('holdsave').scrollTop = 0;
+  document.body.classList.add('noscroll');
+  if (selecting) exitSelect();
+}
+
+$('hold-done').addEventListener('click', () => {
+  $('holdsave').hidden = true;
+  $('hold-list').replaceChildren();
+  if (!viewing) document.body.classList.remove('noscroll');
+});
+
+// Arrived from the plain address with photos to save: select them and get
+// them ready, so one tap on Save opens the share sheet.
+function resumeSave() {
+  if (!pendingSave || !state) return;
+  const ids = pendingSave.filter((id) => current(id));
+  pendingSave = null;
+  if (!ids.length || !canShareFiles) return;
+  closeViewer();
+  if (!selecting) enterSelect();
+  for (const id of ids) if (!selected.has(id)) toggleSelect(id);
+  toast(`Secure address. Tap ${shareLabel(ids.map(current))} to put them in Photos.`);
 }
 
 function take(id) {
@@ -1033,7 +1271,7 @@ function renderViewer() {
     }
   }
   const save = $('v-save');
-  save.hidden = !(canShareFiles && it.kind === 'file' && it.ready);
+  save.hidden = !(it.kind === 'file' && it.ready && (canShareFiles || isMedia(it)));
   if (!save.dataset.busy) save.textContent = it.type === 'image' ? 'Save to Photos' : it.type === 'video' ? 'Save Video' : 'Save';
   $('v-hint').hidden = !(!canShareFiles && it.kind === 'file' && it.ready && it.type === 'image');
   $('v-download').hidden = it.kind === 'text';
@@ -1048,14 +1286,40 @@ $('v-download').addEventListener('click', () => viewing && downloadItems([viewin
 $('v-copy').addEventListener('click', async () => {
   const it = current(viewing);
   if (!it) return;
-  try {
-    await navigator.clipboard.writeText(it.text || '');
+  if (await copyText(it.text || '')) {
     toast('Copied');
     take(it.id);
-  } catch {
-    toast('Select the text and copy it');
-  }
+  } else toast('Select the text and copy it');
 });
+
+// The clipboard API only exists on the secure address. On the plain one the
+// old copy command still works, as long as it runs inside the tap itself,
+// which is why it comes first there.
+async function copyText(text) {
+  if (!(navigator.clipboard && window.isSecureContext)) return copyBySelecting(text);
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return copyBySelecting(text);
+  }
+}
+
+function copyBySelecting(text) {
+  const ta = el('textarea', 'copy-buffer');
+  ta.value = text;
+  ta.readOnly = true;
+  document.body.appendChild(ta);
+  let ok = false;
+  try {
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    ok = document.execCommand('copy');
+  } catch {}
+  ta.remove();
+  return ok;
+}
 $('v-keep').addEventListener('click', () => viewing && api(`/api/items/${viewing}/keep`, { method: 'POST' }).catch((e) => toast(e.message)));
 $('v-remove').addEventListener('click', () => viewing && removeItems([viewing]));
 
@@ -1283,10 +1547,30 @@ function renderSettings() {
   for (const d of (state && state.devices) || []) {
     const li = el('li');
     const isMe = me.device && d.id === me.device.id;
-    li.append(el('span', 'grow', d.name + (isMe ? ' (this phone)' : '')), el('span', 'sub', `last seen ${fmtWhen(d.lastSeen)}`));
+    const seen = d.online || (isMe && online) ? 'connected now' : `last seen ${fmtWhen(d.lastSeen)}`;
+    li.append(el('span', 'grow', d.name + (isMe ? ' (this phone)' : '')), el('span', 'sub', seen));
     list.appendChild(li);
   }
   if (!list.children.length) list.appendChild(el('li', null, 'No phones yet'));
+
+  $('set-linger').textContent = lingerText();
+
+  const peers = knownPeers();
+  const links = $('peer-links');
+  links.replaceChildren();
+  for (const p of peers) links.appendChild(peerLink(p));
+  $('peer-section').hidden = !peers.length || !token;
+}
+
+// How long something taken through this computer stays. Each computer has
+// its own setting, so this only speaks for the one serving the page.
+function lingerText() {
+  const name = me.computer.name;
+  if (!state || state.linger === undefined) return '';
+  if (!state.linger) return `${name} keeps things on the shelf after they are taken until someone removes them. That is a setting on ${name}; each computer has its own.`;
+  const min = Math.round(state.linger / 60000);
+  const span = min >= 60 && min % 60 === 0 ? `${min / 60} hour${min === 60 ? '' : 's'}` : `${min} minute${min === 1 ? '' : 's'}`;
+  return `Once something is saved, downloaded or copied through ${name}, it stays on the shelf for ${span}, then leaves. That is a setting on ${name}; each computer has its own.`;
 }
 
 $('btn-settings').addEventListener('click', () => {
@@ -1296,8 +1580,7 @@ $('btn-settings').addEventListener('click', () => {
 $('btn-secure').addEventListener('click', () => {
   const httpsPort = me && me.ports && me.ports.https;
   if (!httpsPort || !token) return;
-  // The token rides in the fragment: it never leaves the phone.
-  location.href = `https://${location.hostname}:${httpsPort}/#t=${encodeURIComponent(token)}`;
+  goSecure(`https://${location.hostname}:${httpsPort}/`);
 });
 $('settings-done').addEventListener('click', closeSheets);
 $('set-name').addEventListener('change', async (e) => {
@@ -1311,10 +1594,21 @@ $('set-name').addEventListener('change', async (e) => {
 });
 $('btn-forget').addEventListener('click', async () => {
   if (!confirm(standalone ? 'Forget this phone? You will need a new code from your computer to reconnect.' : 'Forget this phone? You will need to scan the QR code again to reconnect.')) return;
-  // Tell the computer too, so the token is dead everywhere, not just here.
+  // Only the computer can end the session: it holds the cookie that would
+  // sign the phone straight back in. So nothing is cleared here unless it
+  // said yes.
+  const btn = $('btn-forget');
+  btn.disabled = true;
+  let ok = false;
   try {
-    await fetch('/api/forget', { method: 'POST', headers: auth() });
+    const r = await fetch('/api/forget', { method: 'POST', headers: auth(), signal: timeoutSignal(8000) });
+    ok = r.ok;
   } catch {}
+  btn.disabled = false;
+  if (!ok) {
+    const name = me ? me.computer.name : 'Your computer';
+    return toast(`${name} is not answering, so it still remembers this phone. Try again when it is awake, or remove the phone in the phone panel on a computer.`, 8000);
+  }
   onUnpaired();
   closeSheets();
 });

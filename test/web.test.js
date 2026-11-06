@@ -374,14 +374,17 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
   });
 
   await t.test('live updates arrive over server-sent events', async () => {
-    const p = sseStates(`${a.base}/api/events?t=${token}`, {}, 2);
-    await new Promise((r) => setTimeout(r, 150));
+    // Three events: the shelf on opening, the phone now showing as connected, and the change.
+    const p = sseStates(`${a.base}/api/events?t=${token}`, {}, 3);
+    await until(() => a.net.web.clients.size === 1, 'stream open');
+    assert.deepStrictEqual(a.net.web.onlineDeviceIds(), [deviceId]);
+    await new Promise((r) => setTimeout(r, 250));
     a.shelf.addText('live');
-    const [first, second] = await p;
+    const [first, , third] = await p;
     assert.ok(first.items.length >= 1);
-    assert.ok(second.items.some((i) => i.text === 'live'));
-    assert.strictEqual(second.computer.name, 'PC');
-    assert.ok(second.devices.some((d) => d.id === deviceId));
+    assert.ok(third.items.some((i) => i.text === 'live'));
+    assert.strictEqual(third.computer.name, 'PC');
+    assert.ok(third.devices.some((d) => d.id === deviceId && d.online === true), 'the phone with a stream open shows as connected now');
   });
 
   await t.test('renaming the phone and removing it', async () => {

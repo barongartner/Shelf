@@ -116,7 +116,7 @@
               <label class="field">
                 <span>Add a computer by IP address</span>
                 <div class="inline">
-                  <input id="add-ip" type="text" placeholder="192.168.1.20" spellcheck="false" />
+                  <input id="add-ip" type="text" placeholder="192.168.1.20 or 192.168.1.20:47474" spellcheck="false" />
                   <button id="btn-add-ip" class="btn">Add</button>
                 </div>
                 <small id="my-address" class="hint"></small>
@@ -126,7 +126,7 @@
 
             <h2>Behavior</h2>
             <label class="field">
-              <span>After something is dragged out or saved to a phone, keep it for</span>
+              <span>On this computer, after something is dragged out, copied or saved, keep it for</span>
               <select id="set-linger">
                 <option value="1">1 minute</option>
                 <option value="5">5 minutes</option>
@@ -135,6 +135,7 @@
                 <option value="60">1 hour</option>
                 <option value="0">Until I remove it</option>
               </select>
+              <small class="hint">Each computer has its own setting. Phones that open the shelf through this computer use it too.</small>
             </label>
             <label class="check"><input id="set-popup" type="checkbox" /> Show the shelf when something arrives</label>
             <label class="check"><input id="set-ontop" type="checkbox" /> Keep the shelf on top of other windows</label>

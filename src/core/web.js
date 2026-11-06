@@ -66,8 +66,9 @@ function clearCookie() {
 }
 
 // The page may only talk to the computer that served it. Its other
-// addresses (the stable name, the secure port) are allowed so the page can
-// check they answer before switching to them.
+// addresses (the stable name, the secure port) and the other computers on
+// the shelf are allowed so the page can check they answer before switching
+// to them.
 function csp(origins) {
   return [
     "default-src 'self'",
@@ -118,7 +119,8 @@ class Web {
   // shelf: the Shelf; self: { id, name } of this computer
   // thumb(item, localPath) -> { buf, type } | null (optional, Electron only)
   // lingerMs() -> ms | null; caDer() -> Buffer | null
-  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [] }) {
+  // peers() -> [{ name, addr, port, host }]: the other computers on the shelf
+  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [], peers = () => [] }) {
     this.shelf = shelf;
     this.self = self;
     this.webDir = webDir || path.join(__dirname, '..', 'web');
@@ -128,6 +130,7 @@ class Web {
     this.caDer = caDer;
     this.ports = ports;
     this.hosts = hosts;
+    this.peers = peers;
     this.pair = null;
     this.fails = new Map(); // ip -> { n, until }
     this.handoffs = new Map(); // code -> { token, deviceId, expiresAt }
@@ -147,6 +150,7 @@ class Web {
     shelf.on('change', this._onChange);
     shelf.on('dropped', this._onDropped);
     this.onPaired = () => {};
+    this.onOnline = () => {}; // the set of phones with an open stream changed
   }
 
   stop() {
@@ -261,9 +265,24 @@ class Web {
     const d = this.shelf.deviceByTokenHash(sha256(token));
     if (!d) return null;
     this.shelf.touchDevice(d.id);
-    d._token = token;
-    d._via = via;
-    return d;
+    // A copy: the token must never land on the record the shelf saves and syncs.
+    return { ...d, _token: token, _via: via };
+  }
+
+  // Phones with a live event stream open to this computer right now.
+  onlineDeviceIds() {
+    return [...new Set([...this.clients].map((c) => c.shelfDevice))];
+  }
+
+  // The other computers a phone could open the shelf through.
+  peerView() {
+    let list = [];
+    try {
+      list = this.peers() || [];
+    } catch {}
+    return list
+      .filter((p) => p && p.port && (p.addr || p.host) && p.online !== false)
+      .map((p) => ({ name: String(p.name || 'Computer'), addr: p.addr || null, port: p.port, host: p.host || null }));
   }
 
   // ---- state ----
@@ -297,12 +316,14 @@ class Web {
   }
 
   snapshot() {
+    const online = new Set(this.onlineDeviceIds());
     return {
       computer: { id: this.self.id, name: this.self.name },
       version: this.version,
       linger: this.lingerMs(),
       items: this.shelf.visible().map((it) => this.itemView(it)),
-      devices: this.shelf.devices().map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen || d.addedAt, addedAt: d.addedAt })),
+      devices: this.shelf.devices().map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen || d.addedAt, addedAt: d.addedAt, online: online.has(d.id) })),
+      peers: this.peerView(),
     };
   }
 
@@ -336,8 +357,10 @@ class Web {
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     });
-    res.write(`: shelf\nretry: 3000\n\nevent: state\ndata: ${JSON.stringify(this.snapshot())}\n\n`);
+    const wasOnline = this.onlineDeviceIds().includes(device.id);
     this.clients.add(res);
+    res.write(`: shelf\nretry: 3000\n\nevent: state\ndata: ${JSON.stringify(this.snapshot())}\n\n`);
+    if (!wasOnline) this._onlineChanged();
     if (!this._heart) {
       // A real event, not a comment: the page uses it to notice a stream iOS
       // killed without saying so.
@@ -347,14 +370,22 @@ class Web {
       }, 20000);
     }
     const drop = () => {
-      this.clients.delete(res);
+      if (!this.clients.delete(res)) return;
       if (!this.clients.size) {
         clearInterval(this._heart);
         this._heart = null;
       }
+      if (!this.onlineDeviceIds().includes(device.id)) this._onlineChanged();
     };
     req.on('close', drop);
     res.on('close', drop);
+  }
+
+  _onlineChanged() {
+    this.broadcast();
+    try {
+      this.onOnline(this.onlineDeviceIds());
+    } catch {}
   }
 
   // ---- thumbnails ----
@@ -423,11 +454,18 @@ class Web {
     if (isHtml) {
       const ports = this.ports();
       const origins = [];
-      for (const h of this.hosts()) {
+      // The address the phone used (often a bare IP) has a secure twin too;
+      // the page checks it answers before moving there to save photos.
+      const asked = String(req.headers.host || '').replace(/:\d+$/, '');
+      const own = /^[A-Za-z0-9.-]+$/.test(asked) ? [asked] : [];
+      for (const h of [...new Set([...this.hosts(), ...own])]) {
         if (ports.http) origins.push(`http://${h}:${ports.http}`);
         if (ports.https) origins.push(`https://${h}:${ports.https}`);
       }
-      headers['content-security-policy'] = csp(origins);
+      for (const peer of this.peerView()) {
+        for (const h of [peer.host, peer.addr]) if (h && /^[A-Za-z0-9.-]+$/.test(h)) origins.push(`http://${h}:${peer.port}`);
+      }
+      headers['content-security-policy'] = csp([...new Set(origins)]);
       headers['referrer-policy'] = 'no-referrer';
     }
     if (req.headers['if-none-match'] === etag) {
@@ -512,6 +550,31 @@ class Web {
 
     if (p === '/api/pair' && method === 'POST') {
       const body = (await readJson(req, 4096)) || {};
+      // A phone that is already on the shelf (its cookie or token came along)
+      // scanned a QR code again: it stays the phone it is, and the code it
+      // brought is used up so it cannot let anyone else in.
+      const existing = this.deviceFor(req, url);
+      if (existing) {
+        const pi = this.pairInfo() && this.pair;
+        const code = normCode(body.code);
+        const pin = String(body.pin || '').replace(/\D/g, '');
+        const used = !!pi && ((code.length === 20 && safeEqual(code, pi.code)) || (!pi.pinLocked && pin.length === 6 && safeEqual(pin, pi.pin)));
+        if (used) {
+          this.pair = null;
+          this.onPaired(this.shelf.items.get(existing.id));
+        }
+        return send(res, 200, {
+          token: existing._token,
+          already: true,
+          device: { id: existing.id, name: existing.name },
+          computer: { id: this.self.id, name: this.self.name },
+          version: this.version,
+          secure: !!req.socket.encrypted,
+          ports: this.ports(),
+          hosts: this.hosts(),
+          peers: this.peerView(),
+        }, existing._via === 'cookie' ? {} : { 'set-cookie': setCookie(existing._token) }), true;
+      }
       const r = this._pairAttempt(clientIp(req), body);
       if (r.status !== 200) return send(res, r.status, { error: r.error }), true;
       const token = crypto.randomBytes(32).toString('base64url');
@@ -527,6 +590,7 @@ class Web {
         secure: !!req.socket.encrypted,
         ports: this.ports(),
         hosts: this.hosts(),
+        peers: this.peerView(),
       }, { 'set-cookie': setCookie(token) }), true;
     }
 
@@ -553,6 +617,7 @@ class Web {
         secure: !!req.socket.encrypted,
         ports: this.ports(),
         hosts: this.hosts(),
+        peers: this.peerView(),
       }, extra), true;
     }
 

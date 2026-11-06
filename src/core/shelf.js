@@ -13,17 +13,22 @@ const TEXT_LIMIT = 256 * 1024;
 // for however long cannot bring back what was removed.
 const TOMBSTONE_TTL = 10 * 365 * 24 * 60 * 60 * 1000;
 const DEVICE_TOUCH_EVERY = 10 * 60 * 1000;
-// A computer that did not set an item's linger time waits this long past it
-// before giving up on hearing the removal from the one that did, so a fast
-// clock on one computer cannot throw things away early everywhere.
-const LINGER_GRACE = 60 * 60 * 1000;
+// A phone nobody has seen for this long is dropped from the shelf.
+const DEVICE_STALE = 90 * 24 * 60 * 60 * 1000;
 const CLOCK_SLACK = 5 * 60 * 1000;
+// A computer that did not set an item's linger time waits this long past it
+// before removing it itself, so a fast clock on one computer cannot throw
+// things away early. Computers further apart than CLOCK_SLACK cannot sync at
+// all, so more than that protects nothing.
+const LINGER_GRACE = CLOCK_SLACK;
 const KINDS = new Set(['file', 'folder', 'text', 'device']);
 
 // The shelf's contents. Every computer holds a copy of the item list and
 // merges what the others send it. Each item carries a version stamp so the
 // latest change wins, except removal, which is final: once anyone removes an
-// item (or its linger time runs out) it stays removed everywhere.
+// item it stays removed everywhere. A linger time running out is a removal
+// too, but a Keep made before the computer that expired it heard about it
+// still wins.
 //
 // Separately, each computer tracks where its own copy of an item's bytes is
 // (`local`). Items dropped here point at the original file; items from other
@@ -66,7 +71,11 @@ class Shelf extends EventEmitter {
         await fs.promises.rename(this.statePath, `${this.statePath}.bad-${Date.now()}`).catch(() => {});
       }
     }
+    // Older versions wrote a phone's token next to its record; anything
+    // like that is dropped here and the file written again without it.
+    let scrub = false;
     for (const it of saved.items || []) {
+      if (it && typeof it === 'object' && Object.keys(it).some((k) => k.startsWith('_'))) scrub = true;
       const clean = sanitizeRemote(it, { trustTime: true });
       if (clean) this.items.set(clean.id, clean);
     }
@@ -91,6 +100,7 @@ class Shelf extends EventEmitter {
     }
     await fs.promises.rm(this.outboxDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     await fs.promises.mkdir(this.outboxDir, { recursive: true });
+    if (scrub) await this.saveNow();
   }
 
   storePath(it) {
@@ -106,7 +116,7 @@ class Shelf extends EventEmitter {
   }
 
   payload() {
-    return [...this.items.values()];
+    return [...this.items.values()].map(stored);
   }
 
   have() {
@@ -227,10 +237,15 @@ class Shelf extends EventEmitter {
   }
 
   // Leaves everything behind: used when this computer starts a new shelf.
-  // Tombstones are kept so the old items cannot come back through a peer
-  // that is still on the old code.
+  // The items are only dropped here, not removed: the computers that keep the
+  // old code keep them, and joining that shelf again brings them back.
   forgetAll() {
-    for (const it of [...this.items.values()]) if (!it.removed) this._tombstone(it);
+    for (const it of [...this.items.values()]) {
+      if (it.removed) continue;
+      this._dropLocal(it.id);
+      this.items.delete(it.id);
+    }
+    this._changed(false);
   }
 
   // ---- phones and browsers ----
@@ -257,7 +272,7 @@ class Shelf extends EventEmitter {
     if (typeof hash !== 'string' || !hash) return null;
     for (const it of this.items.values()) {
       if (it.removed || it.kind !== 'device' || typeof it.tokenHash !== 'string') continue;
-      if (it.tokenHash.length === hash.length && crypto.timingSafeEqual(Buffer.from(it.tokenHash), Buffer.from(hash))) return it;
+      if (it.tokenHash.length === hash.length && crypto.timingSafeEqual(Buffer.from(it.tokenHash), Buffer.from(hash))) return { ...it };
     }
     return null;
   }
@@ -302,12 +317,14 @@ class Shelf extends EventEmitter {
         changed = true;
         continue;
       }
-      if (l.removed) continue;
-      if (r.removed || newer(r, l)) {
+      // An explicit removal is final. An expiry is a version like any other
+      // change, so a Keep made after the take beats it, either way round.
+      if (l.removed && !l.expired) continue;
+      if ((r.removed && !r.expired) || newer(r, l)) {
         this.items.set(r.id, r);
         changed = true;
+        if (r.removed) this._dropLocal(r.id);
       }
-      if (r.removed) this._dropLocal(r.id);
     }
     if (changed) this._changed(true);
     return changed;
@@ -321,7 +338,9 @@ class Shelf extends EventEmitter {
     for (const it of [...this.items.values()]) {
       if (!it.removed && it.expiresAt) {
         const grace = it.vBy === this.self.id ? 0 : LINGER_GRACE;
-        if (it.expiresAt + grace <= now) this._tombstone(it);
+        if (it.expiresAt + grace <= now) this._tombstone(it, { expired: true });
+      } else if (!it.removed && it.kind === 'device' && now - (it.lastSeen || it.addedAt) > DEVICE_STALE) {
+        this._tombstone(it);
       } else if (it.removed && now - it.v > TOMBSTONE_TTL) {
         this.items.delete(it.id);
         this._save();
@@ -390,10 +409,14 @@ class Shelf extends EventEmitter {
     this._put({ ...it, ...patch, v, vBy: this.self.id }, true);
   }
 
-  _tombstone(it) {
-    const v = Math.max(Date.now(), it.v + 1);
+  // An expiry is stamped as the version right after the one it acted on, so
+  // any change made since (a Keep that had not arrived yet) is newer.
+  _tombstone(it, { expired = false } = {}) {
+    const v = expired ? it.v + 1 : Math.max(Date.now(), it.v + 1);
     this._dropLocal(it.id);
-    this._put({ id: it.id, kind: it.kind, removed: true, addedAt: it.addedAt, v, vBy: this.self.id }, true);
+    const t = { id: it.id, kind: it.kind, removed: true, addedAt: it.addedAt, v, vBy: this.self.id };
+    if (expired) t.expired = true;
+    this._put(t, true);
   }
 
   // Deletes this computer's copy, but only if it lives in the store. Files
@@ -441,7 +464,7 @@ class Shelf extends EventEmitter {
   async _writeState() {
     const local = {};
     for (const [id, l] of this.local) if (l.path) local[id] = { path: l.path, state: l.state, uploading: !!l.uploading };
-    const data = JSON.stringify({ items: [...this.items.values()], local });
+    const data = JSON.stringify({ items: [...this.items.values()].map(stored), local });
     const tmp = `${this.statePath}.${process.pid}.${++this._saveSeq}.tmp`;
     const fh = await fs.promises.open(tmp, 'w');
     try {
@@ -490,6 +513,15 @@ class Shelf extends EventEmitter {
   }
 }
 
+// What is saved and synced of an item: never the extras the web layer hangs
+// on a device it is serving (keys starting with '_', such as its token).
+function stored(it) {
+  if (!Object.keys(it).some((k) => k.startsWith('_'))) return it;
+  const out = {};
+  for (const [k, v] of Object.entries(it)) if (!k.startsWith('_')) out[k] = v;
+  return out;
+}
+
 function newer(a, b) {
   if (a.v !== b.v) return a.v > b.v;
   return String(a.vBy) > String(b.vBy);
@@ -507,7 +539,11 @@ function sanitizeRemote(r, { trustTime = false } = {}) {
   const addedAt = num(r.addedAt, maxTime);
   if (v === null || addedAt === null) return null;
   const kind = KINDS.has(r.kind) ? r.kind : null;
-  if (r.removed) return { id: r.id, kind: kind || undefined, removed: true, addedAt, v, vBy: str(r.vBy, 64) };
+  if (r.removed) {
+    const t = { id: r.id, kind: kind || undefined, removed: true, addedAt, v, vBy: str(r.vBy, 64) };
+    if (r.expired === true) t.expired = true;
+    return t;
+  }
   if (!kind) return null;
   const out = {
     id: r.id,

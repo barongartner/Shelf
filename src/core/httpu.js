@@ -147,9 +147,14 @@ async function sendFile(req, res, file, { name, inline = false, mime, cache = 'p
   stream.pipe(res);
 }
 
+// Compares bytes, not characters: header values arrive as latin1, so a
+// string of the right length can still encode to a different byte count.
 function safeEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  if (x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
 }
 
 function sha256(s) {

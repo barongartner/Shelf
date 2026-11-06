@@ -134,6 +134,33 @@
       </footer>
     </div>
 
+    <div id="sheet-save" class="sheet" hidden>
+      <div class="sheet-card">
+        <div class="sheet-grip"></div>
+        <h2 id="save-title">Save to Photos</h2>
+        <p class="hint" id="save-text"></p>
+        <ol class="steps" id="save-steps">
+          <li><span id="save-step1"></span><a href="/cert" download="Shelf Certificate.cer">Download the certificate</a> and tap <strong>Allow</strong>.</li>
+          <li>Open the Settings app, tap <strong>Profile Downloaded</strong> near the top, then <strong>Install</strong>.</li>
+          <li>Still in Settings: General, About, Certificate Trust Settings, turn on <strong>Shelf</strong>.</li>
+          <li>Come back here and tap the button.</li>
+        </ol>
+        <button id="save-switch" class="pill primary big wide">I trusted it, save now</button>
+        <div class="btn-row">
+          <button id="save-cancel" class="pill">Cancel</button>
+          <button id="save-hold" class="pill">Press and hold instead</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="holdsave" class="holdsave" hidden>
+      <header class="hold-top">
+        <p id="hold-hint" class="hold-hint"></p>
+        <button id="hold-done" class="pill light">Done</button>
+      </header>
+      <div id="hold-list" class="hold-list"></div>
+    </div>
+
     <div id="sheet-text" class="sheet" hidden>
       <div class="sheet-card">
         <div class="sheet-grip"></div>
@@ -155,6 +182,11 @@
           <input id="set-name" type="text" maxlength="60" autocomplete="off" />
         </label>
         <p class="hint">Connected to <strong id="set-computer"></strong>. Everything on this shelf is shared with every computer on it.</p>
+        <p class="hint" id="set-linger"></p>
+        <div id="peer-section" hidden>
+          <p class="hint">This phone can also open the shelf through the other computers on it, already signed in. When this computer stops answering, the page looks for one of them by itself.</p>
+          <div id="peer-links" class="peer-links"></div>
+        </div>
 
         <h2 id="home-section">Home Screen</h2>
         <p class="hint" id="home-text"></p>

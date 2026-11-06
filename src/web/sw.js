@@ -43,12 +43,26 @@ self.addEventListener('fetch', (event) => {
         const hit = await cache.match(req, { ignoreSearch: false });
         if (hit) return hit;
       }
-      try {
-        const fresh = await fetch(req);
-        if (fresh && fresh.ok) cache.put(isShell ? '/' : req, fresh.clone());
+      const network = fetch(req).then((fresh) => {
+        if (fresh && fresh.ok) return cache.put(isShell ? '/' : req, fresh.clone()).then(() => fresh, () => fresh);
         return fresh;
+      });
+      // A sleeping computer leaves the connection hanging for a long while.
+      // The page itself waits 2.5 s at most: after that the kept copy opens
+      // and the answer, when it comes, only refreshes the copy for next time.
+      if (isShell) {
+        event.waitUntil(network.catch(() => {}));
+        const late = new Promise((resolve) => setTimeout(() => resolve(null), 2500));
+        const first = await Promise.race([network.catch(() => null), late]);
+        if (first) return first;
+        const hit = await cache.match('/');
+        if (hit) return hit;
+        return network;
+      }
+      try {
+        return await network;
       } catch (err) {
-        const hit = await cache.match(isShell ? '/' : req);
+        const hit = await cache.match(req);
         if (hit) return hit;
         throw err;
       }
