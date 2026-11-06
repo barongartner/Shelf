@@ -1,7 +1,7 @@
 {
   "name": "shelf",
   "productName": "Shelf",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A file shelf shared by your computers and your phone, on your own network.",
   "author": "Baron Gartner <barongartner@gmail.com>",
   "license": "MIT",
