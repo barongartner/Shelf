@@ -12,6 +12,7 @@ const { isIP } = require('net');
 const { EventEmitter } = require('events');
 const files = require('./files');
 const { Web } = require('./web');
+const { Push } = require('./push');
 const tlsmod = require('./tls');
 const { send, readBody, parseJson, safeEqual, sha256 } = require('./httpu');
 
@@ -245,7 +246,7 @@ class Net extends EventEmitter {
     this.declines = new Map(); // addr -> { n, until } for /pair
     this.pairingFrom = new Set(); // addrs with a /pair dialog open
     this.lastPairDialog = 0;
-    this.webOpts = web; // { webDir?, version?, thumb?, lingerMs?, certDir }
+    this.webOpts = web; // { webDir?, version?, thumb?, lingerMs?, certDir, pushFile?, push? }
     this.web = null;
     this.tls = null;
     this.httpsPort = null;
@@ -293,6 +294,7 @@ class Net extends EventEmitter {
         ports: () => ({ http: this.port, https: this.httpsPort }),
         hosts: () => this.addresses.hosts.filter((h) => h.endsWith('.local')),
         peers: () => this.peerList().filter((p) => p.online).map((p) => ({ name: p.name, addr: p.addr, port: p.port, host: p.host })),
+        push: this.webOpts.push || (this.webOpts.pushFile ? new Push({ file: this.webOpts.pushFile }) : null),
       });
       this.web.onPaired = (d) => this.emit('paired', d);
       this.on('peers', () => this.web.broadcast());

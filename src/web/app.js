@@ -37,6 +37,7 @@ let viewing = null;
 let suppressClick = false;
 let lastPairCheck = 0;
 let pendingSave = null; // ids handed over from the plain address to save here
+let pendingOpen = null; // ids a tapped notification asked to show
 const selected = new Set();
 const tiles = new Map(); // id -> { el, parts, key }
 const rows = new Map();
@@ -316,6 +317,9 @@ async function boot() {
   // on the secure one, one tap from the share sheet.
   const toSave = (h.get('s') || '').split(',').filter((x) => /^[\w-]{1,64}$/.test(x));
   if (toSave.length) pendingSave = toSave;
+  // Opened from a notification: the new things it was about.
+  const fresh = (q.get('n') || '').split(',').filter((x) => /^[\w-]{1,64}$/.test(x));
+  if (fresh.length) pendingOpen = fresh;
   if (location.search || location.hash) history.replaceState(history.state, '', location.pathname);
   if (code) {
     // A QR code scanned on a phone that is already connected: ask first. The
@@ -400,6 +404,7 @@ function enterApp({ cached = null } = {}) {
   connect();
   probeCookie();
   maybeShowHomeCard();
+  syncPush();
 }
 
 let offlineSince = 0;
@@ -516,6 +521,7 @@ function connect() {
       apply(JSON.parse(e.data));
     } catch {}
     resumeSave();
+    openNew();
   });
   es.addEventListener('ping', () => {
     lastBeat = Date.now();
@@ -1130,6 +1136,32 @@ function resumeSave() {
   toast(`Secure address. Tap ${shareLabel(ids.map(current))} to put them in Photos.`);
 }
 
+// Opened from a notification: show what it was about. One thing opens in
+// the viewer; several come up selected, so photos are one tap from Photos.
+function openNew() {
+  if (!pendingOpen || !state) return;
+  const ids = pendingOpen.filter((id) => current(id));
+  pendingOpen = null;
+  if (!ids.length) return toast('That is not on the shelf any more.');
+  closeSheets();
+  closeViewer();
+  if (ids.length === 1) return openViewer(ids[0]);
+  if (selecting) exitSelect();
+  enterSelect();
+  for (const id of ids) toggleSelect(id);
+  const its = ids.map(current);
+  toast(canShareFiles && its.every(isMedia) ? `Tap ${shareLabel(its)} to put them in Photos.` : `${ids.length} new things, picked out.`);
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    const m = e.data || {};
+    if (m.type !== 'shelf-open' || !Array.isArray(m.ids)) return;
+    pendingOpen = m.ids.filter((x) => typeof x === 'string' && /^[\w-]{1,64}$/.test(x));
+    if (online) openNew();
+  });
+}
+
 function take(id) {
   api(`/api/items/${id}/take`, { method: 'POST' }).catch(() => {});
 }
@@ -1542,6 +1574,8 @@ function renderSettings() {
     steps.hidden = true;
     btn.hidden = true;
   }
+  renderPush();
+
   const list = $('device-list');
   list.replaceChildren();
   for (const d of (state && state.devices) || []) {
@@ -1561,6 +1595,154 @@ function renderSettings() {
   for (const p of peers) links.appendChild(peerLink(p));
   $('peer-section').hidden = !peers.length || !token;
 }
+
+// ---- notifications ----
+
+// The computer sends a push when something new lands on the shelf. Push
+// needs the secure address and, on iPhone, the Home Screen app.
+const canPush = !!(window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window);
+let pushInfo = null; // { key, on, lastError, computer } from the computer
+let pushSub = null; // this app's subscription, if it has one
+
+function keyBytes(b64u) {
+  const s = String(b64u).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(s + '='.repeat((4 - (s.length % 4)) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+function sameKey(buf, b64u) {
+  if (!buf || !b64u) return false;
+  const a = new Uint8Array(buf);
+  const b = keyBytes(b64u);
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+function swReady() {
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Shelf is still setting itself up on this phone. Try again in a moment.')), 8000)),
+  ]);
+}
+
+// Run on every open: the computer learns the subscription again if it lost
+// it, and a subscription made with an old key is replaced.
+async function syncPush() {
+  if (!canPush || !token || (isIOS && !standalone)) return renderPush();
+  try {
+    pushInfo = await api('/api/push');
+  } catch {
+    pushInfo = null;
+    return renderPush();
+  }
+  try {
+    const reg = await swReady();
+    pushSub = await reg.pushManager.getSubscription();
+    if (pushSub && Notification.permission === 'granted') {
+      if (!sameKey(pushSub.options && pushSub.options.applicationServerKey, pushInfo.key)) {
+        await pushSub.unsubscribe().catch(() => {});
+        pushSub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(pushInfo.key) }).catch(() => null);
+      }
+      if (pushSub) pushInfo = { ...pushInfo, ...(await api('/api/push', { method: 'POST', body: { subscription: pushSub.toJSON() } })) };
+    }
+  } catch {}
+  renderPush();
+}
+
+function renderPush() {
+  const text = $('push-text');
+  $('btn-push').hidden = true;
+  $('btn-push-test').hidden = true;
+  $('btn-push-off').hidden = true;
+  const name = me ? me.computer.name : 'your computer';
+  const sends = `${name} sends them, so it has to be on with Shelf running.`;
+  if (!window.isSecureContext) {
+    text.textContent = `Shelf can ping this phone when something new lands on the shelf, but only on the secure address${isIOS ? ' and from the Home Screen app' : ''}. Set up the secure address under Save to Photos first.`;
+    return;
+  }
+  if (isIOS && !standalone) {
+    text.textContent = 'On iPhone, only the Home Screen app can get notifications. Add Shelf to your Home Screen from this page (see Home Screen above), open it from the icon, and turn them on there.';
+    return;
+  }
+  if (!canPush) {
+    text.textContent = 'This browser cannot show notifications from a page.';
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    text.textContent = 'Notifications are blocked for Shelf. Turn them on in Settings, Notifications, Shelf, then come back here.';
+    return;
+  }
+  if (!pushInfo) {
+    text.textContent = `${name} is not answering, so notifications cannot be set up right now.`;
+    return;
+  }
+  if (pushSub && pushInfo.on && Notification.permission === 'granted') {
+    let t = `On. You get a notification when something new lands on the shelf from another device. Tap it and Shelf opens with the new things picked out. ${sends}`;
+    if (pushInfo.lastError) t += ` The last one did not go through: ${pushInfo.lastError}`;
+    text.textContent = t;
+    $('btn-push-test').hidden = false;
+    $('btn-push-off').hidden = false;
+    return;
+  }
+  text.textContent = `Get a notification when something new lands on the shelf. Tap it and Shelf opens with the new things picked out. ${sends}`;
+  $('btn-push').hidden = false;
+}
+
+$('btn-push').addEventListener('click', async () => {
+  const btn = $('btn-push');
+  btn.disabled = true;
+  try {
+    // First, while the tap still counts: iOS only asks from a tap.
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') throw new Error(perm === 'denied' ? 'Notifications are blocked. Turn them on in Settings, Notifications, Shelf.' : 'Notifications were not allowed.');
+    if (!pushInfo) pushInfo = await api('/api/push');
+    const reg = await swReady();
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !sameKey(sub.options && sub.options.applicationServerKey, pushInfo.key)) {
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(pushInfo.key) });
+    pushSub = sub;
+    pushInfo = { ...pushInfo, ...(await api('/api/push', { method: 'POST', body: { subscription: sub.toJSON() } })) };
+    toast('Notifications are on');
+  } catch (err) {
+    toast(err.message || 'Could not turn on notifications', 6000);
+  }
+  btn.disabled = false;
+  renderPush();
+});
+
+$('btn-push-test').addEventListener('click', async () => {
+  const btn = $('btn-push-test');
+  btn.disabled = true;
+  try {
+    pushInfo = { ...pushInfo, ...(await api('/api/push/test', { method: 'POST', body: {} })) };
+    toast('Sent. It should show up in a few seconds.');
+  } catch (err) {
+    toast(`It did not go through: ${err.message}`, 8000);
+    try {
+      pushInfo = await api('/api/push');
+    } catch {}
+  }
+  btn.disabled = false;
+  renderPush();
+});
+
+$('btn-push-off').addEventListener('click', async () => {
+  const btn = $('btn-push-off');
+  btn.disabled = true;
+  try {
+    const endpoint = pushSub ? pushSub.endpoint : null;
+    if (pushSub) await pushSub.unsubscribe().catch(() => {});
+    pushSub = null;
+    pushInfo = { ...pushInfo, ...(await api('/api/push/off', { method: 'POST', body: { endpoint } })) };
+    toast('Notifications are off');
+  } catch (err) {
+    toast(err.message, 6000);
+  }
+  btn.disabled = false;
+  renderPush();
+});
 
 // How long something taken through this computer stays. Each computer has
 // its own setting, so this only speaks for the one serving the page.

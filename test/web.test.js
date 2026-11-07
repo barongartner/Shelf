@@ -133,7 +133,11 @@ test('a phone pairs, reads, downloads, uploads and is forgotten', async (t) => {
     assert.strictEqual(anon.json.display, 'standalone');
     assert.strictEqual(anon.json.start_url, '/', 'nobody signed in, nothing to hand over');
     assert.strictEqual(anon.json.scope, '/');
-    assert.ok(anon.json.icons.some((i) => i.src === '/apple-touch-icon.png' && i.sizes === '180x180'));
+    // Inline PNGs: iOS drew a letter instead of linked manifest icons.
+    const touch = fs.readFileSync(path.join(WEB_DIR, 'apple-touch-icon.png'));
+    const i180 = anon.json.icons.find((i) => i.sizes === '180x180');
+    assert.strictEqual(i180.src, `data:image/png;base64,${touch.toString('base64')}`);
+    assert.ok(anon.json.icons.every((i) => i.src.startsWith('data:image/png;base64,') && i.purpose === 'any'));
     const pair = a.net.web.newPair();
     const r = await call(a.base, '/api/pair', { method: 'POST', body: { code: pair.code } });
     const tok = r.json.token;

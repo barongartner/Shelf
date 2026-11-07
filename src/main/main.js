@@ -146,6 +146,7 @@ async function start() {
       thumb: thumbForWeb,
       lingerMs,
       certDir: path.join(DATA(), 'certs'),
+      pushFile: path.join(DATA(), 'push.json'),
     },
   });
   await net.start();

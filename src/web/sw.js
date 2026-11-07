@@ -69,3 +69,47 @@ self.addEventListener('fetch', (event) => {
     })(),
   );
 });
+
+// ---- notifications ----
+
+// The computer sends one when something new lands on the shelf. iOS takes
+// away the subscription of a page that gets a push and shows nothing, so
+// every push shows a notification, even one that cannot be read.
+self.addEventListener('push', (event) => {
+  let m = {};
+  try {
+    m = event.data ? event.data.json() : {};
+  } catch {}
+  const title = typeof m.title === 'string' && m.title ? m.title : 'Shelf';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: typeof m.body === 'string' ? m.body : 'Something new is on the shelf.',
+      tag: typeof m.tag === 'string' ? m.tag : 'shelf',
+      icon: '/apple-touch-icon.png',
+      badge: '/icon-192.png',
+      data: { url: typeof m.url === 'string' && m.url.startsWith('/') ? m.url : '/' },
+    }),
+  );
+});
+
+// A tap opens the shelf with the new things picked out. An open window is
+// told to show them; otherwise the app opens at an address that says which.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = new URL((event.notification.data && event.notification.data.url) || '/', self.location.origin);
+  const ids = (url.searchParams.get('n') || '').split(',').filter((x) => /^[\w-]{1,64}$/.test(x));
+  event.waitUntil(
+    (async () => {
+      const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      const win = wins.find((w) => new URL(w.url).origin === self.location.origin);
+      if (win) {
+        win.postMessage({ type: 'shelf-open', ids });
+        try {
+          await win.focus();
+          return;
+        } catch {}
+      }
+      await self.clients.openWindow(url.href);
+    })(),
+  );
+});

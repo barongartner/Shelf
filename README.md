@@ -109,6 +109,13 @@ save one photo at a time by pressing and holding it.
 
 <p align="center"><img src="media/Setup.png" alt="The one-time setup sheet on the phone, with the four steps" width="880"></p>
 
+**Notifications:** open Shelf from the Home Screen icon, go to Settings and tap **Turn on
+notifications**. Now when something lands on the shelf from another device, your phone
+pings you ("4 photos, sent from your PC"). Tap it and Shelf opens with them already picked
+out, so photos are one tap from your camera roll. Stuff you send from the phone yourself
+doesn't ping you. On iPhone this needs the one-time setup above and the Home Screen icon,
+and the computer that sends them has to be on with Shelf running.
+
 **Sending stuff from your phone:** use **Photos** and **Files** at the bottom of the page,
 or paste text in. It shows up on every computer with your phone's name on it.
 

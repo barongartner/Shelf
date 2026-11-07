@@ -22,6 +22,10 @@ const MAX_THUMBS = 400;
 const UPLOAD_IDLE_MS = 60 * 1000;
 const MANIFEST_LIMIT = 2000;
 const HANDOFF_TTL = 10 * 60 * 1000;
+// Things dropped on the shelf together go out as one notification: it is
+// sent once nothing new has turned up for this long (or after the cap).
+const NOTIFY_DELAY = 2500;
+const NOTIFY_CAP = 10000;
 
 // Safari asks for the home-screen icon at these root paths on its own, with
 // no cookies and no token, so they are public like the page itself. The
@@ -120,7 +124,8 @@ class Web {
   // thumb(item, localPath) -> { buf, type } | null (optional, Electron only)
   // lingerMs() -> ms | null; caDer() -> Buffer | null
   // peers() -> [{ name, addr, port, host }]: the other computers on the shelf
-  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [], peers = () => [] }) {
+  // push: a Push (see push.js) to notify phones of new things, or null
+  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [], peers = () => [], push = null, notifyDelay = NOTIFY_DELAY }) {
     this.shelf = shelf;
     this.self = self;
     this.webDir = webDir || path.join(__dirname, '..', 'web');
@@ -139,9 +144,16 @@ class Web {
     this.thumbs = new Map(); // id -> { buf, type } | null
     this.thumbPending = new Map();
     this.listeners = [];
+    this.push = push;
+    this.notifyDelay = notifyDelay;
+    // Everything already on the shelf when the computer starts counts as
+    // told: a restart must not ring the phone for old things.
+    this.told = new Set(shelf.visible().map((it) => it.id));
+    this.fresh = []; // ids ready here and not told yet, waiting for the batch
     this._onChange = () => {
       this._dropRevoked();
       this.broadcast();
+      this._noticeNew();
     };
     this._onDropped = (id) => {
       this.thumbs.delete(id);
@@ -157,6 +169,7 @@ class Web {
     this.shelf.off('change', this._onChange);
     this.shelf.off('dropped', this._onDropped);
     clearTimeout(this._broadcastTimer);
+    clearTimeout(this._notifyTimer);
     clearInterval(this._heart);
     for (const c of this.clients) c.end();
     this.clients.clear();
@@ -388,6 +401,76 @@ class Web {
     } catch {}
   }
 
+  // ---- notifications ----
+
+  // Called on every change: anything that is now ready on this computer and
+  // that the phones were not told about yet joins the next notification.
+  _noticeNew() {
+    if (!this.push) return;
+    const visible = this.shelf.visible();
+    const live = new Set(visible.map((it) => it.id));
+    for (const id of this.told) if (!live.has(id) && !this.shelf.items.has(id)) this.told.delete(id);
+    let added = false;
+    for (const it of visible) {
+      if (this.told.has(it.id) || it.kind === 'device') continue;
+      const l = this.shelf.local.get(it.id);
+      if (it.kind !== 'text' && !(l && l.state === 'ready')) continue;
+      this.told.add(it.id);
+      this.fresh.push(it.id);
+      added = true;
+    }
+    if (!added) return;
+    if (!this._notifyFirst) this._notifyFirst = Date.now();
+    clearTimeout(this._notifyTimer);
+    const wait = Math.max(0, Math.min(this.notifyDelay, this._notifyFirst + NOTIFY_CAP - Date.now()));
+    this._notifyTimer = setTimeout(() => this._sendFresh().catch(() => {}), wait);
+  }
+
+  async _sendFresh() {
+    const ids = this.fresh;
+    this.fresh = [];
+    this._notifyFirst = 0;
+    this._notifyTimer = null;
+    const phones = new Set(this.shelf.devices().map((d) => d.id));
+    this.push.keepOnly([...phones]);
+    for (const deviceId of this.push.devices()) {
+      // What the phone put on the shelf itself is not news to it.
+      const its = ids.map((id) => this.shelf.items.get(id)).filter((it) => it && !it.removed && it.addedBy !== deviceId);
+      if (!its.length) continue;
+      await this.push.send(deviceId, this.message(its));
+    }
+  }
+
+  // The notification for a batch of new things. Kept short: the whole
+  // message has to fit in one push (4 KB).
+  //
+  // iOS draws a web app's notification as the title, then "from Shelf",
+  // then the body. So the title says what arrived (never "Shelf"), and the
+  // body says who sent it and what a tap does.
+  message(its) {
+    const from = [...new Set(its.map((it) => it.addedByName).filter(Boolean))];
+    const sender = from.length === 1 ? from[0] : null;
+    const types = its.map((it) => (it.kind === 'file' ? kindOfName(it.name) : it.kind));
+    const media = types.every((t) => t === 'image' || t === 'video');
+    const n = its.length;
+    let title;
+    let body;
+    if (n === 1 && its[0].kind === 'text') {
+      title = sender ? `Text from ${sender}` : 'New text';
+      body = String(its[0].text || its[0].name).trim().slice(0, 160);
+    } else if (n === 1) {
+      title = its[0].name.slice(0, 80);
+      body = `${sender ? `Sent from ${sender}. ` : ''}Tap to open it.`;
+    } else {
+      const noun = types.every((t) => t === 'image') ? 'photos' : types.every((t) => t === 'video') ? 'videos' : media ? 'photos and videos' : its.every((it) => it.kind === 'file') ? 'files' : 'items';
+      title = `${n} ${noun}`;
+      const names = its.slice(0, 3).map((it) => it.name.slice(0, 40)).join(', ');
+      body = `${sender ? `Sent from ${sender}: ` : ''}${names}${n > 3 ? `, and ${n - 3} more` : ''}. ${media ? 'Tap to save them.' : 'Tap to see them.'}`;
+    }
+    const ids = its.slice(0, 60).map((it) => it.id);
+    return { title, body, tag: 'shelf-new', url: `/?n=${ids.join(',')}` };
+  }
+
   // ---- thumbnails ----
 
   async thumbFor(it, localPath) {
@@ -426,6 +509,11 @@ class Web {
       this.statics.set(name, body);
     }
     return this.statics.get(name);
+  }
+
+  _dataUri(name) {
+    const buf = this._static(name);
+    return buf ? `data:image/png;base64,${buf.toString('base64')}` : null;
   }
 
   // The page is always revalidated (cheaply, by ETag) so an update reaches
@@ -494,10 +582,14 @@ class Web {
         display: 'standalone',
         background_color: '#f2f2f7',
         theme_color: '#3a63e8',
+        // Inline, not linked: when a page has a manifest, iOS builds the Home
+        // Screen icon from these and draws a letter on theme_color when it
+        // cannot use them. With linked files it drew the letter on Baron's
+        // iPhone (2026-11-07) even though the share sheet showed the same
+        // PNG fine; an inline icon was what worked for Laneway's site.
         icons: [
-          { src: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' },
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+          { src: this._dataUri('apple-touch-icon.png') || '/apple-touch-icon.png', sizes: '180x180', type: 'image/png', purpose: 'any' },
+          { src: this._dataUri('icon-512.png') || '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
         ],
       }),
       'utf8',
@@ -633,6 +725,8 @@ class Web {
 
     if (!device) return send(res, 401, { error: 'not paired' }), true;
 
+    if (p.startsWith('/api/push')) return this._pushRoute(req, res, p, method, device), true;
+
     if (p === '/api/state' && get) return send(res, 200, this.snapshot()), true;
     if (p === '/api/events' && get) return this._sse(req, res, device), true;
 
@@ -722,6 +816,32 @@ class Web {
 
     send(res, 404, { error: 'not found' });
     return true;
+  }
+
+  // GET /api/push: the key to subscribe with and whether this phone is on.
+  // POST /api/push: a subscription. POST /api/push/off: stop.
+  // POST /api/push/test: send this phone a notification now.
+  async _pushRoute(req, res, p, method, device) {
+    if (!this.push) return send(res, 404, { error: 'This computer does not send notifications.' });
+    if (p === '/api/push' && (method === 'GET' || method === 'HEAD')) {
+      return send(res, 200, { key: this.push.publicKey(), computer: this.self.name, ...this.push.status(device.id) });
+    }
+    if (method !== 'POST') return send(res, 405, { error: 'method' });
+    const body = (await readJson(req, 4096)) || {};
+    if (p === '/api/push') {
+      if (!this.push.subscribe(device.id, body.subscription)) return send(res, 400, { error: 'That is not a subscription this computer can send to.' });
+      return send(res, 200, { ok: true, ...this.push.status(device.id) });
+    }
+    if (p === '/api/push/off') {
+      this.push.unsubscribe(device.id, typeof body.endpoint === 'string' ? body.endpoint : null);
+      return send(res, 200, { ok: true, ...this.push.status(device.id) });
+    }
+    if (p === '/api/push/test') {
+      const results = await this.push.send(device.id, { title: 'Notifications are on', body: `Test from ${this.self.name}. New things on the shelf show up like this.`, tag: 'shelf-test', url: '/' });
+      const ok = results.some((r) => r.ok);
+      return send(res, ok ? 200 : 502, { ok, results: results.map((r) => ({ status: r.status, error: r.error })), ...this.push.status(device.id) });
+    }
+    return send(res, 404, { error: 'not found' });
   }
 
   async _thumbRoute(req, res, it) {
