@@ -9,8 +9,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { PassThrough } = require('stream');
 const files = require('./files');
 const zip = require('./zip');
+const { buildShortcut, isSigned } = require('./shortcut');
 const { send, readJson, sendFile, contentDisposition, mimeFor, kindOfName, sha256, safeEqual } = require('./httpu');
 
 const PAIR_TTL = 10 * 60 * 1000;
@@ -115,6 +117,90 @@ function nameFromUa(ua = '') {
   return 'Browser';
 }
 
+// ---- the share sheet (see Web._share) ----
+
+const SHARE_EXT = {
+  'image/jpeg': 'jpg', 'image/heic': 'heic', 'image/heif': 'heif', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp',
+  'video/quicktime': 'mov', 'video/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/wav': 'wav',
+  'application/pdf': 'pdf', 'application/zip': 'zip', 'text/html': 'html', 'text/plain': 'txt',
+};
+const SHARE_BINARY = /^(image|video|audio|font)\/|^application\/(pdf|zip|vnd\.|msword|x-zip|gzip|x-7z|x-rar|octet-stream-binary)/;
+const SHARE_TEXT_EXT = /\.(txt|url|webloc)$/i;
+
+// The text a shared body stands for, or null when it is a file. Links come
+// through as plain text, as a .url or .webloc file, or as JSON.
+function shareText(buf, type) {
+  if (!buf.length || buf.length > TEXT_LIMIT) return null;
+  if (SHARE_BINARY.test(type) || type === 'text/html') return null;
+  let s;
+  try {
+    s = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    return null;
+  }
+  s = s.replace(/^﻿/, '');
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(s)) return null;
+  if (type === 'application/json' || /^\s*\{/.test(s)) {
+    try {
+      const j = JSON.parse(s);
+      const v = j && (j.text || j.url || j.link);
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    } catch {}
+  }
+  const ini = /^\s*\[InternetShortcut\][\s\S]*?^URL=(.+)$/m.exec(s);
+  if (ini) return ini[1].trim();
+  if (/^\s*<\?xml[\s\S]*<plist/.test(s)) {
+    const u = /<key>URL<\/key>\s*<string>([^<]+)<\/string>/.exec(s);
+    if (u) return u[1].replace(/&amp;/g, '&').trim();
+    return null;
+  }
+  return s.trim() ? s.trim() : null;
+}
+
+const HTML_LIMIT = 8 * 1024 * 1024;
+
+// The address a web page gives for itself: og:url, then the canonical link.
+function pageLink(buf) {
+  const s = buf.toString('utf8');
+  const tags = s.match(/<(meta|link)\b[^>]*>/gi) || [];
+  const attr = (t, a) => {
+    const m = new RegExp(`\\b${a}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(t);
+    return m ? (m[2] ?? m[3] ?? m[4] ?? '') : null;
+  };
+  let og = null;
+  let canon = null;
+  for (const t of tags) {
+    if (!og && /^<meta/i.test(t) && /^og:url$/i.test(attr(t, 'property') || attr(t, 'name') || '')) og = attr(t, 'content');
+    if (!canon && /^<link/i.test(t) && /(^|\s)canonical(\s|$)/i.test(attr(t, 'rel') || '')) canon = attr(t, 'href');
+    if (og && canon) break;
+  }
+  const url = (og || canon || '').trim().replace(/&amp;/g, '&');
+  return /^https?:\/\/\S+$/i.test(url) ? url : null;
+}
+
+function dispositionName(h) {
+  if (!h) return '';
+  const star = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(h);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"|"$/g, ''));
+    } catch {}
+  }
+  const m = /filename\s*=\s*"?([^";]+)"?/i.exec(h);
+  return m ? m[1].trim() : '';
+}
+
+function shareName(given, type) {
+  let name = String(given || '').split(/[\\/]/).pop().trim();
+  const ext = SHARE_EXT[type];
+  if (!name) {
+    const kind = /^image\//.test(type) ? 'Photo' : /^video\//.test(type) ? 'Video' : /^audio\//.test(type) ? 'Audio' : type === 'application/pdf' ? 'Document' : 'File';
+    name = kind;
+  }
+  if (ext && !/\.[A-Za-z0-9]{1,8}$/.test(name)) name += '.' + ext;
+  return name.slice(0, 200);
+}
+
 function clientIp(req) {
   return String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
 }
@@ -125,7 +211,7 @@ class Web {
   // lingerMs() -> ms | null; caDer() -> Buffer | null
   // peers() -> [{ name, addr, port, host }]: the other computers on the shelf
   // push: a Push (see push.js) to notify phones of new things, or null
-  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [], peers = () => [], push = null, notifyDelay = NOTIFY_DELAY }) {
+  constructor({ shelf, self, webDir, version = '0', thumb = null, lingerMs = () => null, caDer = () => null, ports = () => ({}), hosts = () => [], peers = () => [], push = null, notifyDelay = NOTIFY_DELAY, shortcutFile = null }) {
     this.shelf = shelf;
     this.self = self;
     this.webDir = webDir || path.join(__dirname, '..', 'web');
@@ -145,6 +231,7 @@ class Web {
     this.thumbPending = new Map();
     this.listeners = [];
     this.push = push;
+    this.shortcutFile = shortcutFile;
     this.notifyDelay = notifyDelay;
     // Everything already on the shelf when the computer starts counts as
     // told: a restart must not ring the phone for old things.
@@ -516,6 +603,16 @@ class Web {
     return buf ? `data:image/png;base64,${buf.toString('base64')}` : null;
   }
 
+  // What the page puts in its script and stylesheet URLs, and so what the
+  // phone's kept copy is filed under. It comes from the files themselves,
+  // not just the version number, so a rebuild with the same version still
+  // reaches a phone that kept the old one.
+  assetTag() {
+    const h = crypto.createHash('sha256');
+    for (const n of ['app.js', 'style.css', 'sw.js']) h.update(this._static(n) || '');
+    return `${this.version}-${h.digest('hex').slice(0, 10)}`;
+  }
+
   // The page is always revalidated (cheaply, by ETag) so an update reaches
   // the phone on its next open; the script and stylesheet are referenced
   // with the version in their URL, so they can be cached hard.
@@ -527,7 +624,7 @@ class Web {
       // A phone the cookie already knows gets its token in the manifest link
       // straight from the markup, before any script runs.
       const manifest = device ? `/manifest.webmanifest?t=${encodeURIComponent(device._token)}` : '/manifest.webmanifest';
-      body = Buffer.from(body.toString('utf8').split('__SHELF_V__').join(encodeURIComponent(this.version)).split('__SHELF_MANIFEST__').join(manifest), 'utf8');
+      body = Buffer.from(body.toString('utf8').split('__SHELF_V__').join(encodeURIComponent(this.assetTag())).split('__SHELF_MANIFEST__').join(manifest), 'utf8');
     }
     const etag = `"${sha256(body).slice(0, 32)}"`;
     const isWorker = name === 'sw.js';
@@ -624,6 +721,23 @@ class Web {
       return true;
     }
 
+    // The share sheet Shortcut. Neither file holds a key, so both are public.
+    // The signed one is what a phone installs; the unsigned one is what a
+    // Mac signs (see shortcut.js).
+    if (p === '/Shelf.shortcut' || p === '/shortcut/unsigned') {
+      if (!get) return send(res, 405, { error: 'method' }), true;
+      const buf = p === '/Shelf.shortcut' ? this.signedShortcut() : buildShortcut();
+      if (!buf) return send(res, 404, { error: 'no signed shortcut on this computer yet' }), true;
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': buf.length,
+        'content-disposition': contentDisposition('attachment', 'Shelf.shortcut'),
+        'cache-control': 'no-store',
+      });
+      res.end(method === 'HEAD' ? undefined : buf);
+      return true;
+    }
+
     if (p === '/cert') {
       const der = this.caDer();
       if (!der) return send(res, 404, { error: 'no certificate' }), true;
@@ -710,6 +824,7 @@ class Web {
         ports: this.ports(),
         hosts: this.hosts(),
         peers: this.peerView(),
+        shortcut: !!this.signedShortcut(),
       }, extra), true;
     }
 
@@ -769,6 +884,8 @@ class Web {
       }
     }
 
+    if (p === '/api/share' && (method === 'POST' || method === 'PUT')) return this._share(req, res, url, device), true;
+
     const act = /^\/api\/items\/([a-f0-9]{16,64})\/(remove|keep|take)$/.exec(p);
     if (act && method === 'POST') {
       const [, id, what] = act;
@@ -816,6 +933,137 @@ class Web {
 
     send(res, 404, { error: 'not found' });
     return true;
+  }
+
+  // The signed Shortcut: one dropped in this computer's data folder wins over
+  // the one that ships with the app.
+  signedShortcut() {
+    for (const f of [this.shortcutFile, path.join(this.webDir, 'Shelf.shortcut')]) {
+      if (!f) continue;
+      try {
+        const buf = fs.readFileSync(f);
+        if (isSigned(buf)) return buf;
+      } catch {}
+    }
+    return null;
+  }
+
+  // POST /api/share: whatever the iPhone share sheet hands a Shortcut. The
+  // Shortcut sends each thing as the raw body, so this works out what it is:
+  // a link or text becomes a text item, anything else is a file. A name can
+  // come in ?name=; without one the file is named after its type.
+  async _share(req, res, url, device) {
+    const by = { id: device.id, name: device.name };
+    const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const given = String(url.searchParams.get('name') || '').trim();
+    const head = [];
+    let got = 0;
+    let ended = false;
+    // Read up to the text limit, or until the body ends, whichever is first.
+    await new Promise((resolve, reject) => {
+      const onData = (c) => {
+        head.push(c);
+        got += c.length;
+        if (got > TEXT_LIMIT) done();
+      };
+      const onEnd = () => {
+        ended = true;
+        done();
+      };
+      const onErr = (e) => {
+        cleanup();
+        reject(e);
+      };
+      const cleanup = () => {
+        req.off('data', onData);
+        req.off('end', onEnd);
+        req.off('error', onErr);
+      };
+      const done = () => {
+        cleanup();
+        req.pause();
+        resolve();
+      };
+      req.on('data', onData);
+      req.on('end', onEnd);
+      req.on('error', onErr);
+    }).catch(() => null);
+    let buf = Buffer.concat(head);
+    if (ended && !buf.length) return send(res, 400, { error: 'nothing to add' });
+
+    // A file that comes with a name (photo.jpg, notes.csv) stays a file. A
+    // lone link is always text, even when Shortcuts names it after its host
+    // (www.instagram.com looks like a file name).
+    const fileName = given || dispositionName(req.headers['content-disposition']);
+    const named = /\.[A-Za-z0-9]{1,8}$/.test(fileName) && !SHARE_TEXT_EXT.test(fileName);
+    const found = ended ? shareText(buf, type) : null;
+    const link = found != null && /^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(found);
+    const text = link || !named ? found : null;
+    if (text != null) {
+      try {
+        const it = this.shelf.addText(text, by);
+        return send(res, 201, { item: this.itemView(it) });
+      } catch (err) {
+        return send(res, 400, { error: err.message });
+      }
+    }
+
+    // A shared link reaches Shortcuts as the web page itself, which it sends
+    // whole (YouTube.html). The page says its own address, so the link goes
+    // on the shelf instead of the page.
+    if (type === 'text/html' || /\.html?$/i.test(fileName)) {
+      let page = buf;
+      if (!ended) {
+        const more = [buf];
+        let n = buf.length;
+        try {
+          for await (const c of req) {
+            more.push(c);
+            n += c.length;
+            if (n > HTML_LIMIT) break;
+          }
+        } catch {}
+        page = Buffer.concat(more);
+        ended = n <= HTML_LIMIT;
+      }
+      const link = pageLink(page);
+      if (link) {
+        try {
+          const it = this.shelf.addText(link, by);
+          return send(res, 201, { item: this.itemView(it) });
+        } catch (err) {
+          return send(res, 400, { error: err.message });
+        }
+      }
+      if (!ended) return send(res, 413, { error: 'that page is too big to put on the shelf' });
+      buf = page;
+    }
+
+    const name = shareName(fileName, type);
+    const size = Number(req.headers['content-length']) || 0;
+    const body = new PassThrough();
+    body.write(buf);
+    if (ended) body.end();
+    else {
+      req.on('error', (e) => body.destroy(e));
+      req.pipe(body);
+      req.resume();
+    }
+    const stalled = () => req.destroy(new Error('upload stalled'));
+    req.socket.setTimeout(UPLOAD_IDLE_MS);
+    req.socket.on('timeout', stalled);
+    try {
+      const it = await this.shelf.addUpload({ name, size, stream: body, by });
+      return send(res, 201, { item: this.itemView(it) });
+    } catch (err) {
+      if (!res.headersSent) send(res, 500, { error: err.message || 'upload failed' });
+      else res.destroy();
+    } finally {
+      try {
+        req.socket.setTimeout(0);
+        req.socket.off('timeout', stalled);
+      } catch {}
+    }
   }
 
   // GET /api/push: the key to subscribe with and whether this phone is on.
@@ -914,4 +1162,4 @@ class Web {
   }
 }
 
-module.exports = { Web, nameFromUa, PAIR_TTL };
+module.exports = { Web, nameFromUa, PAIR_TTL, shareText, shareName, pageLink };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, dialog, shell, clipboard, Notification } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -11,7 +11,7 @@ const QRCode = require('qrcode');
 const { Shelf } = require('../core/shelf');
 const { Net, newCode, normalizeCode } = require('../core/net');
 const files = require('../core/files');
-const { extOf } = require('../core/httpu');
+const { extOf, kindOfName } = require('../core/httpu');
 
 const isMac = process.platform === 'darwin';
 const ASSETS = path.join(__dirname, '..', '..', 'assets');
@@ -100,6 +100,7 @@ function loadSettings() {
     lingerMin: s.lingerMin ?? 10,
     onTop: s.onTop ?? true,
     popUp: s.popUp ?? true,
+    notifyPhone: s.notifyPhone ?? true,
     // A position saved by the old plain window is dropped once, so the popup
     // starts out docked to its icon.
     bounds: s.layout === 'popup' ? s.bounds || null : null,
@@ -123,10 +124,62 @@ function saveSettings() {
   }, 200);
 }
 
+// ---- notifications for things a phone sends ----
+
+// A phone (through this computer or another one on the shelf) put something
+// on the shelf. Things sent together, like a batch of photos from the share
+// sheet, become one notification once nothing new has come for 2 seconds.
+let phoneNew = [];
+let phoneTimer = null;
+let phoneNote = null;
+
+function fromPhone(it) {
+  const d = it.addedBy && shelf.items.get(it.addedBy);
+  return !!d && d.kind === 'device';
+}
+
+function phoneArrived(it) {
+  if (!settings.notifyPhone || !Notification.isSupported()) return;
+  phoneNew.push(it);
+  clearTimeout(phoneTimer);
+  phoneTimer = setTimeout(notifyPhone, phoneNew.length >= 60 ? 0 : 2000);
+}
+
+function phoneNoteText(its) {
+  const from = [...new Set(its.map((it) => it.addedByName).filter(Boolean))];
+  const sender = from.length === 1 ? from[0] : 'your phone';
+  const n = its.length;
+  if (n === 1 && its[0].kind === 'text') return { title: `Text from ${sender}`, body: String(its[0].text || its[0].name).trim().slice(0, 200) };
+  if (n === 1) return { title: its[0].name.slice(0, 80), body: `From ${sender}. Click to open the shelf.` };
+  const kinds = its.map((it) => (it.kind === 'file' ? kindOfName(it.name) : it.kind));
+  const noun = kinds.every((k) => k === 'image') ? 'photos' : kinds.every((k) => k === 'video') ? 'videos' : kinds.every((k) => k === 'image' || k === 'video') ? 'photos and videos' : its.every((it) => it.kind === 'file') ? 'files' : 'things';
+  const names = its.slice(0, 3).map((it) => it.name.slice(0, 40)).join(', ');
+  return { title: `${n} ${noun} from ${sender}`, body: `${names}${n > 3 ? `, and ${n - 3} more` : ''}. Click to open the shelf.` };
+}
+
+function notifyPhone() {
+  const its = phoneNew.filter((it) => {
+    const cur = shelf.items.get(it.id);
+    return cur && !cur.removed;
+  });
+  phoneNew = [];
+  if (!its.length) return;
+  const { title, body } = phoneNoteText(its);
+  phoneNote = new Notification({ title, body, icon: path.join(ASSETS, 'icon-256.png') });
+  phoneNote.on('click', () => {
+    placeIfUnmoved();
+    reveal(false);
+  });
+  phoneNote.show();
+}
+
 // ---- startup ----
 
 async function start() {
   if (isMac) app.dock?.hide();
+  // Windows only shows notifications for the app id its Start menu
+  // shortcut was installed with.
+  if (process.platform === 'win32') app.setAppUserModelId('com.barongartner.shelf');
   fs.mkdirSync(DATA(), { recursive: true });
   settings = loadSettings();
   saveSettings();
@@ -147,17 +200,19 @@ async function start() {
       lingerMs,
       certDir: path.join(DATA(), 'certs'),
       pushFile: path.join(DATA(), 'push.json'),
+      shortcutFile: path.join(DATA(), 'Shelf.shortcut'),
     },
   });
   await net.start();
 
   shelf.on('change', pushState);
   shelf.on('dropped', (id) => icons.delete(id));
-  shelf.on('arrived', () => {
+  shelf.on('arrived', (it) => {
     if (settings.popUp && win && !win.isVisible()) {
       placeIfUnmoved();
       reveal(true);
     }
+    if (it && fromPhone(it)) phoneArrived(it);
   });
   net.on('peers', pushState);
   if (net.web) net.web.onOnline = pushState;
@@ -548,6 +603,7 @@ function snapshot() {
       lingerMin: settings.lingerMin,
       onTop: settings.onTop,
       popUp: settings.popUp,
+      notifyPhone: settings.notifyPhone,
       openAtLogin: opensAtLogin(),
     },
     items: shelf.visible().map((it) => {
@@ -820,6 +876,8 @@ function setSetting(key, value) {
     applyOnTop();
   } else if (key === 'popUp') {
     settings.popUp = !!value;
+  } else if (key === 'notifyPhone') {
+    settings.notifyPhone = !!value;
   } else if (key === 'openAtLogin') {
     app.setLoginItemSettings({ openAtLogin: !!value, ...loginItem() });
   } else if (key === 'address') {

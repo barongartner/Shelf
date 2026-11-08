@@ -117,7 +117,28 @@ doesn't ping you. On iPhone this needs the one-time setup above and the Home Scr
 and the computer that sends them has to be on with Shelf running.
 
 **Sending stuff from your phone:** use **Photos** and **Files** at the bottom of the page,
-or paste text in. It shows up on every computer with your phone's name on it.
+or paste text in. It shows up on every computer with your phone's name on it, and the
+computers pop a notification so you know it's there (you can turn that off in Settings).
+
+**The share sheet:** you can put Shelf in the share sheet of every app on your iPhone. Share
+a link, a photo or a file, tap Shelf, and it's on the shelf without leaving the app you're
+in. Links come through as links, even though Shortcuts hands over the whole web page. Apple
+doesn't let websites in there, so it's a Shortcut. The steps to build it are in the phone's
+Settings under **Share Sheet**, along with the address to paste (about two minutes). It sends
+straight to your computer over your Wi-Fi, so your phone has to be on the same network.
+
+If you have a Mac, you can make it a one-tap install instead. iPhone only adds Shortcuts
+that Apple has signed, and only a Mac can sign them, so run this once on the Mac while
+Shelf is running on your computer:
+
+```bash
+curl -fsSL http://<your-computer>.local:47474/shortcut/unsigned -o /tmp/Shelf.shortcut && shortcuts sign -m people-who-know-me -i /tmp/Shelf.shortcut -o ~/Desktop/Shelf.shortcut
+```
+
+Put the signed `Shelf.shortcut` in Shelf's data folder on the computer your phone uses
+(`%APPDATA%\Shelf` on Windows, `~/Library/Application Support/Shelf` on a Mac). The phone's
+Settings then shows **Install the Shortcut**. The signed file carries your Apple ID details,
+which is why Shelf doesn't ship one.
 
 **Other files:** the **Download** button saves to the Files app. Folders and multiple
 non-photo files come down as a .zip.

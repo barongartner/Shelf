@@ -1575,6 +1575,7 @@ function renderSettings() {
     btn.hidden = true;
   }
   renderPush();
+  renderShare();
 
   const list = $('device-list');
   list.replaceChildren();
@@ -1647,6 +1648,53 @@ async function syncPush() {
   } catch {}
   renderPush();
 }
+
+// The address the share sheet Shortcut posts to. It carries this phone's
+// key, so things shared through it land with this phone's name on them. It
+// uses the computer's name on the network, which survives a new IP address.
+// It is the plain port on purpose: Shortcuts refuses the computer's own
+// certificate even when Safari trusts it ("The certificate for this server
+// is invalid"), found on a real iPhone on 2026-11-07.
+function shareAddress() {
+  if (!me || !token) return null;
+  const host = (me.hosts && me.hosts[0]) || location.hostname;
+  const ports = me.ports || {};
+  const port = ports.http || (location.protocol === 'http:' ? location.port : null);
+  if (!port) return null;
+  return `http://${host}:${port}/api/share?t=${encodeURIComponent(token)}&name=`;
+}
+
+function renderShare() {
+  const addr = shareAddress();
+  $('share-addr').textContent = addr || '';
+  $('btn-share-copy').disabled = !addr;
+  $('share-install').hidden = !(me && me.shortcut && addr && isIOS);
+  const name = me ? me.computer.name : 'your computer';
+  $('share-note').textContent = isIOS
+    ? `It sends straight to ${name}, so it works when this phone is on the same Wi-Fi and ${name} is on with Shelf running. The address has this phone's key in it: keep it to yourself. Forgetting this phone stops it working.`
+    : 'The share sheet Shortcut is an iPhone thing. On other phones, use Add text or the Photos and Files buttons.';
+}
+
+$('btn-share-copy').addEventListener('click', async () => {
+  const addr = shareAddress();
+  if (!addr) return;
+  toast((await copyText(addr)) ? 'Copied. Now paste it in Shortcuts.' : 'Select the address and copy it');
+});
+
+// Copy first, while the tap still counts, then download the Shortcut: on
+// adding it, Shortcuts asks for the address.
+$('btn-share-install').addEventListener('click', async () => {
+  const addr = shareAddress();
+  if (!addr) return;
+  const copied = await copyText(addr);
+  toast(copied ? 'Share address copied. Paste it when Shortcuts asks.' : 'Copy the address below, then paste it when Shortcuts asks.', 6000);
+  const a = document.createElement('a');
+  a.href = '/Shelf.shortcut';
+  a.download = 'Shelf.shortcut';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
 
 function renderPush() {
   const text = $('push-text');

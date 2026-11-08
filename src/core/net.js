@@ -295,6 +295,7 @@ class Net extends EventEmitter {
         hosts: () => this.addresses.hosts.filter((h) => h.endsWith('.local')),
         peers: () => this.peerList().filter((p) => p.online).map((p) => ({ name: p.name, addr: p.addr, port: p.port, host: p.host })),
         push: this.webOpts.push || (this.webOpts.pushFile ? new Push({ file: this.webOpts.pushFile }) : null),
+        shortcutFile: this.webOpts.shortcutFile || null,
       });
       this.web.onPaired = (d) => this.emit('paired', d);
       this.on('peers', () => this.web.broadcast());

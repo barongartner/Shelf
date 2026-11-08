@@ -1093,6 +1093,15 @@ input[type='text']:focus {
   margin: 6px 0;
 }
 
+.share-addr {
+  font: 12px ui-monospace, Menlo, monospace;
+  color: var(--muted);
+  word-break: break-all;
+  user-select: all;
+  -webkit-user-select: all;
+  margin: 8px 0;
+}
+
 .device-list {
   list-style: none;
   margin: 0;

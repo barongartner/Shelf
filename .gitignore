@@ -3,3 +3,8 @@ dist/
 out/
 .DS_Store
 *.log
+
+# Signed with my own Apple ID: it carries my email and phone hashes, so it
+# never goes in the public repo. It lives in Shelf's data folder instead.
+src/web/Shelf.shortcut
+*.shortcut

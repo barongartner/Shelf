@@ -210,6 +210,35 @@
           <button id="btn-push-off" class="pill" hidden>Turn off</button>
         </div>
 
+        <h2>Share Sheet</h2>
+        <p class="hint" id="share-text">Put Shelf in the share sheet of every app. Share a link, a photo or a file, tap Shelf, and it lands on the shelf without leaving the app you are in.</p>
+        <div id="share-install" hidden>
+          <ol class="steps">
+            <li>Tap <strong>Install the Shortcut</strong>. It copies your share address and downloads the Shortcut.</li>
+            <li>If Shortcuts does not open by itself, open the download (Files, Downloads, Shelf).</li>
+            <li>Tap <strong>Set Up Shortcut</strong>, paste into the box, and tap <strong>Add Shortcut</strong>.</li>
+            <li>Try it: share a link from Safari, scroll down and tap <strong>Shelf</strong>.</li>
+          </ol>
+          <div class="btn-row">
+            <button id="btn-share-install" class="pill primary">Install the Shortcut</button>
+          </div>
+          <p class="hint">Or build it yourself:</p>
+        </div>
+        <ol class="steps" id="share-steps">
+          <li>Tap <strong>Copy share address</strong> below.</li>
+          <li>Open the Shortcuts app and tap <strong>+</strong>. Tap the name at the top, choose <strong>Rename</strong> and call it Shelf. In the same menu tap <strong>Details</strong>, turn on <strong>Show in Share Sheet</strong> and tap Done.</li>
+          <li>Tap <strong>Search Actions</strong>, add <strong>Repeat with Each</strong>. If it does not already say Shortcut Input, tap its blue word and pick Shortcut Input.</li>
+          <li>Search again and add <strong>Get Contents of URL</strong>. Drag it inside the repeat, between Repeat with Each and End Repeat.</li>
+          <li>Tap the URL field and paste. Then tap <strong>Repeat Item</strong> in the bar above the keyboard so it lands at the very end, tap it, and pick <strong>Name</strong>.</li>
+          <li>Tap the arrow on that action. Set Method to <strong>POST</strong>, Request Body to <strong>File</strong>, tap File and pick <strong>Repeat Item</strong>. Tap Done.</li>
+          <li>Try it: share a link from Safari, scroll down and tap <strong>Shelf</strong>. Tap Edit Actions at the bottom of the share sheet to move it to the top.</li>
+        </ol>
+        <p class="share-addr" id="share-addr"></p>
+        <div class="btn-row">
+          <button id="btn-share-copy" class="pill primary">Copy share address</button>
+        </div>
+        <p class="hint" id="share-note"></p>
+
         <h2>Phones on this shelf</h2>
         <ul id="device-list" class="device-list"></ul>
 

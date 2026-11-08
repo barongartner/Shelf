@@ -423,6 +423,7 @@ function renderSettings(full) {
   if (full || document.activeElement !== $('set-name')) $('set-name').value = state.self.name;
   $('set-linger').value = String(s.lingerMin);
   $('set-popup').checked = s.popUp;
+  $('set-notify').checked = s.notifyPhone;
   $('set-ontop').checked = s.onTop;
   $('set-login').checked = s.openAtLogin;
   $('code').textContent = state.code;
@@ -567,6 +568,7 @@ function renderPhone() {
 $('set-name').addEventListener('change', (e) => run(api.setSetting('name', e.target.value)));
 $('set-linger').addEventListener('change', (e) => run(api.setSetting('lingerMin', Number(e.target.value))));
 $('set-popup').addEventListener('change', (e) => run(api.setSetting('popUp', e.target.checked)));
+$('set-notify').addEventListener('change', (e) => run(api.setSetting('notifyPhone', e.target.checked)));
 $('set-ontop').addEventListener('change', (e) => run(api.setSetting('onTop', e.target.checked)));
 $('set-login').addEventListener('change', (e) => run(api.setSetting('openAtLogin', e.target.checked)));
 $('btn-reset-pos').addEventListener('click', () => run(api.setSetting('resetPosition', true)));
